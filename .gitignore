@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+.venv/
+node_modules/
+dist/
+playwright-report/
+test-results/
+tmp/
+.env
+.env.*
+!.env.example
+Statements.pdf
+Detalle_mov_cuenta_03_07_2026.xls

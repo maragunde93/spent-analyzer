@@ -1,0 +1,23 @@
+FROM mcr.microsoft.com/playwright:v1.49.1-noble
+
+WORKDIR /workspace
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt backend/requirements.txt
+RUN python3 -m venv /opt/spent-venv \
+  && /opt/spent-venv/bin/pip install --no-cache-dir -r backend/requirements.txt
+
+COPY frontend/package.json frontend/package.json
+WORKDIR /workspace/frontend
+RUN npm install -g pnpm@10.15.1 && pnpm install
+
+WORKDIR /workspace
+COPY . .
+
+ENV PATH="/opt/spent-venv/bin:${PATH}"
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+CMD ["bash", "scripts/run-container-tests.sh"]

@@ -1,0 +1,9 @@
+services:
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      VITE_API_BASE: http://127.0.0.1:8000
+      CI_STRICT_VISUAL: "${CI_STRICT_VISUAL:-0}"
+    ipc: host
