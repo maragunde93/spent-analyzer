@@ -1,5 +1,5 @@
 import { categories, demoDashboard, demoExpenses, demoImport } from "./mockData";
-import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, HomeGroup, ImportBatch, ReceiptImport, User } from "./types";
+import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, HomeGroup, ImportBatch, ReceiptImport, Subcategory, User } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 const headers = { "X-Test-User-Email": "mauro@example.test" };
@@ -21,8 +21,11 @@ export const api = {
     { id: 1, email: "mauro@example.test", display_name: "Mauro", role: "owner" },
     { id: 2, email: "mica@example.test", display_name: "Mica", role: "member" }
   ]),
-  dashboard: (homeId: number, paidByUserId?: string) => {
-    const params = paidByUserId && paidByUserId !== "all" ? `?paid_by_user_id=${paidByUserId}` : "";
+  dashboard: (homeId: number, paidByUserId?: string, categoryIds: number[] = []) => {
+    const search = new URLSearchParams();
+    if (paidByUserId && paidByUserId !== "all") search.set("paid_by_user_id", paidByUserId);
+    for (const categoryId of categoryIds) search.append("category_ids", String(categoryId));
+    const params = search.toString() ? `?${search.toString()}` : "";
     return request<DashboardSummary>(`/households/${homeId}/dashboard${params}`, undefined, demoDashboard);
   },
   expenses: (homeId: number) => request<Expense[]>(`/households/${homeId}/expenses`, undefined, demoExpenses),
@@ -46,6 +49,26 @@ export const api = {
         body: JSON.stringify(category)
       },
       { id: categoryId, subcategories: [], ...category }
+    ),
+  createSubcategory: (homeId: number, payload: { category_id: number; name: string }) =>
+    request<Category>(
+      `/households/${homeId}/subcategories`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      },
+      categories.find((category) => category.id === payload.category_id) ?? categories[0]
+    ),
+  updateSubcategory: (homeId: number, subcategoryId: number, payload: Pick<Subcategory, "name">) =>
+    request<Category>(
+      `/households/${homeId}/subcategories/${subcategoryId}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      },
+      categories[0]
     ),
   createExpense: (homeId: number, expense: Partial<Expense>) =>
     request<Expense>(
@@ -107,7 +130,12 @@ export const api = {
     lineIds: number[],
     paidByUserId: number,
     categoryOverrides: Record<number, number | null>,
-    subcategoryOverrides: Record<number, number | null>
+    subcategoryOverrides: Record<number, number | null>,
+    recurringOverrides: Record<number, boolean> = {},
+    noteOverrides: Record<number, string | null> = {},
+    reimbursementOverrides: Record<number, boolean> = {},
+    paidByOverrides: Record<number, number> = {},
+    rejectedLineIds: number[] = []
   ) =>
     request<{ created: number }>(
       `/households/${homeId}/imports/${batchId}/commit`,
@@ -117,8 +145,13 @@ export const api = {
         body: JSON.stringify({
           line_ids: lineIds,
           paid_by_user_id: paidByUserId,
+          paid_by_overrides: paidByOverrides,
+          rejected_line_ids: rejectedLineIds,
           category_overrides: categoryOverrides,
-          subcategory_overrides: subcategoryOverrides
+          subcategory_overrides: subcategoryOverrides,
+          recurring_overrides: recurringOverrides,
+          note_overrides: noteOverrides,
+          reimbursement_overrides: reimbursementOverrides
         })
       },
       { created: lineIds.length }
@@ -141,13 +174,37 @@ export const api = {
     ),
   history: (homeId: number) => request<AuditLog[]>(`/households/${homeId}/history`, undefined, []),
   receipts: (homeId: number) => request<ReceiptImport[]>(`/households/${homeId}/receipts`, undefined, []),
-  uploadReceipt: (homeId: number, file: File, expenseId?: number) => {
+  uploadReceipt: (homeId: number, file: File | File[], expenseId?: number, signal?: AbortSignal) => {
     const form = new FormData();
-    form.append("file", file);
+    const files = Array.isArray(file) ? file : [file];
+    files.forEach((item) => form.append("files", item));
     if (expenseId) form.append("expense_id", String(expenseId));
     return request<ReceiptImport>(
       `/households/${homeId}/receipts`,
-      { method: "POST", body: form }
+      { method: "POST", body: form, signal }
     );
-  }
+  },
+  updateReceiptItems: (homeId: number, receiptId: number, categoryId: number | null, items: Array<{ id: number; description: string; subcategory_id: number | null; suggested_subcategory_name: string | null; quantity: string | null; unit_price: string | null; total_amount: string; accepted: boolean }>) =>
+    request<ReceiptImport>(
+      `/households/${homeId}/receipts/${receiptId}/items`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category_id: categoryId, items })
+      }
+    ),
+  associateReceipt: (homeId: number, receiptId: number, payload: { expense_id: number; category_id: number | null }) =>
+    request<ReceiptImport>(
+      `/households/${homeId}/receipts/${receiptId}/association`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }
+    ),
+  deleteReceipt: (homeId: number, receiptId: number) =>
+    request<{ ok: boolean }>(
+      `/households/${homeId}/receipts/${receiptId}`,
+      { method: "DELETE" }
+    )
 };

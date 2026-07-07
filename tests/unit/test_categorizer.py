@@ -19,8 +19,11 @@ class CategorizerTests(unittest.TestCase):
         self.assertEqual(reversal.name, "Servicios")
 
     def test_mep_and_travel_rules_use_current_categories(self):
-        self.assertEqual(suggest_category("TITULOS COMPRA DOLAR MEP").name, "Servicios")
+        self.assertIsNone(suggest_category("TITULOS COMPRA DOLAR MEP"))
         self.assertEqual(suggest_category("HOTEL DEMO SA").name, "Vacaciones")
+
+    def test_edesur_is_service(self):
+        self.assertEqual(suggest_category("EDESUR FACTURA 123").name, "Servicios")
 
 
 if __name__ == "__main__":

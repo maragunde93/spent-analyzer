@@ -34,6 +34,10 @@ class BbvaAccountParserTests(unittest.TestCase):
         self.assertEqual(_classify("CUENTA MASTER NRO. 1234567890", 0), ImportLineKind.card_payment)
         self.assertEqual(_classify("PAGO DE SERVICIOS TARJETA 18073039 OP3802", 0), ImportLineKind.debit_purchase)
 
+    def test_financial_movements_and_cash_withdrawals_are_not_regular_consumption(self):
+        self.assertEqual(_classify("TITULOS 022938914403CUT", 0), ImportLineKind.adjustment)
+        self.assertEqual(_classify("OPERACION EN EFECTIVO TARJE 18073039 OP5056", 0), ImportLineKind.cash_withdrawal)
+
 
 if __name__ == "__main__":
     unittest.main()

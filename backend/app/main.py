@@ -1,3 +1,6 @@
+import asyncio
+from contextlib import suppress
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -5,6 +8,7 @@ from app.api import auth, cash, dashboard, expenses, fx, history, households, im
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, init_db
 from app.dev_seed import seed_development_data
+from app.services.fx_updater import run_daily_blue_rate_update
 
 
 def create_app() -> FastAPI:
@@ -28,10 +32,26 @@ def create_app() -> FastAPI:
     app.include_router(receipts.router)
 
     @app.on_event("startup")
-    def startup() -> None:
+    async def startup() -> None:
         init_db()
         with SessionLocal() as db:
             seed_development_data(db)
+        if settings.fx_auto_update_enabled:
+            app.state.fx_update_task = asyncio.create_task(
+                run_daily_blue_rate_update(
+                    SessionLocal,
+                    api_url=settings.fx_api_url,
+                    hour_argentina=settings.fx_update_hour_argentina,
+                )
+            )
+
+    @app.on_event("shutdown")
+    async def shutdown() -> None:
+        task = getattr(app.state, "fx_update_task", None)
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     @app.get("/health")
     def health() -> dict:

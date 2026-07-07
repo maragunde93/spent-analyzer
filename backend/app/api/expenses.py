@@ -10,6 +10,7 @@ from app.models import CashWalletEntry, Category, Expense, ExpenseSource, User
 from app.schemas import ExpenseCreate, ExpenseRead, ExpenseUpdate
 from app.services.accounting import add_cash_expense_entry, amount_to_ars
 from app.services.audit import log_action
+from app.services.merchant_learning import learn_from_expense
 from app.services.recurring import sync_recurring_rule
 
 router = APIRouter(prefix="/households/{home_group_id}/expenses", tags=["expenses"])
@@ -69,11 +70,12 @@ def create_expense(
         original_amount=payload.original_amount,
         amount_ars=amount_ars,
         notes=payload.notes,
-        is_recurring=payload.is_recurring or category_name == "Suscripciones",
+        is_recurring=payload.is_recurring or category_name in ("Suscripciones", "Servicios"),
     )
     db.add(expense)
     db.flush()
     add_cash_expense_entry(db, expense)
+    learn_from_expense(db, expense)
     sync_recurring_rule(db, expense)
     log_action(
         db,
@@ -114,10 +116,15 @@ def update_expense(
         expense.amount_ars = updates["amount_ars"]
     elif "original_amount" in updates or "currency" in updates or "date" in updates:
         expense.amount_ars = amount_to_ars(db, expense.original_amount, expense.currency, expense.date)
+    if "category_id" in updates and "is_recurring" not in updates:
+        category_name = db.scalar(select(Category.name).where(Category.id == expense.category_id, Category.home_group_id == home_group_id)) if expense.category_id else None
+        if category_name in ("Suscripciones", "Servicios"):
+            expense.is_recurring = True
 
     db.execute(delete(CashWalletEntry).where(CashWalletEntry.expense_id == expense.id))
     db.flush()
     add_cash_expense_entry(db, expense)
+    learn_from_expense(db, expense)
     sync_recurring_rule(db, expense)
     log_action(
         db,

@@ -9,5 +9,7 @@ tmp/
 .env
 .env.*
 !.env.example
+statements/
 Statements.pdf
+statement-mica.pdf
 Detalle_mov_cuenta_03_07_2026.xls

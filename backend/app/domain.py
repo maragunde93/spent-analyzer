@@ -27,4 +27,5 @@ class ImportLineKind(str, Enum):
     card_payment = "card_payment"
     transfer = "transfer"
     income = "income"
+    reimbursement = "reimbursement"
     previous_payment = "previous_payment"

@@ -6,12 +6,22 @@ export const users = [
 ];
 
 export const categories: Category[] = [
-  { id: 1, name: "Delivery", color: "#0ea5e9", icon: "utensils" },
-  { id: 2, name: "Supermercado", color: "#a28211", icon: "shopping-cart" },
+  { id: 1, name: "Delivery", color: "#41b6e6", icon: "utensils" },
+  {
+    id: 2,
+    name: "Compras del hogar",
+    color: "#2171b5",
+    icon: "shopping-cart",
+    subcategories: [
+      { id: 10, category_id: 2, name: "Almacén" },
+      { id: 11, category_id: 2, name: "Verdulería" },
+      { id: 12, category_id: 2, name: "Carnicería" }
+    ]
+  },
   {
     id: 3,
     name: "Servicios",
-    color: "#a35a33",
+    color: "#ff9800",
     icon: "receipt",
     subcategories: [
       { id: 301, category_id: 3, name: "Electricidad" },
@@ -21,9 +31,11 @@ export const categories: Category[] = [
       { id: 305, category_id: 3, name: "Internet" }
     ]
   },
-  { id: 4, name: "Suscripciones", color: "#ffd84d", icon: "repeat" },
-  { id: 5, name: "Vacaciones", color: "#08a612", icon: "plane" },
-  { id: 7, name: "Transporte", color: "#8b92cb", icon: "car" }
+  { id: 4, name: "Suscripciones", color: "#ffc107", icon: "repeat" },
+  { id: 5, name: "Vacaciones", color: "#4caf50", icon: "plane" },
+  { id: 7, name: "Transporte", color: "#9c27b0", icon: "car" },
+  { id: 8, name: "Vestimenta", color: "#e91e63", icon: "shirt" },
+  { id: 9, name: "Regalos", color: "#ff5722", icon: "gift" }
 ];
 
 export const demoExpenses: Expense[] = [
@@ -61,7 +73,8 @@ export const demoExpenses: Expense[] = [
     source: "import_pdf",
     currency: "USD",
     original_amount: "20.00",
-    amount_ars: "20000.00"
+    amount_ars: "20000.00",
+    is_recurring: true
   },
   {
     id: 4,
@@ -92,7 +105,7 @@ export const demoExpenses: Expense[] = [
 export const demoDashboard: DashboardSummary = {
   total_ars: "222852.90",
   by_category: [
-    { name: "Supermercado", amount_ars: "163472.90" },
+    { name: "Compras del hogar", amount_ars: "163472.90" },
     { name: "Delivery", amount_ars: "39380.00" },
     { name: "Suscripciones", amount_ars: "20000.00" }
   ],
@@ -103,15 +116,23 @@ export const demoDashboard: DashboardSummary = {
     { period: "2026-05", amount_ars: "222852.90" }
   ],
   monthly_by_category: [
-    { period: "2026-03", Delivery: "45000.00", Supermercado: "84000.00" },
-    { period: "2026-04", Delivery: "60000.00", Supermercado: "170000.00", Servicios: "85000.00" },
-    { period: "2026-05", Delivery: "39380.00", Supermercado: "163472.90", Suscripciones: "20000.00" }
+    { period: "2026-03", Delivery: "45000.00", "Compras del hogar": "84000.00" },
+    { period: "2026-04", Delivery: "60000.00", "Compras del hogar": "170000.00", Servicios: "85000.00" },
+    { period: "2026-05", Delivery: "39380.00", "Compras del hogar": "163472.90", Suscripciones: "20000.00" }
   ],
   cumulative_by_category: [
-    { period: "2026-03", Delivery: "45000.00", Supermercado: "84000.00" },
-    { period: "2026-04", Delivery: "105000.00", Supermercado: "254000.00", Servicios: "85000.00" },
-    { period: "2026-05", Delivery: "144380.00", Supermercado: "417472.90", Servicios: "85000.00", Suscripciones: "20000.00" }
+    { period: "2026-03", Delivery: "45000.00", "Compras del hogar": "84000.00" },
+    { period: "2026-04", Delivery: "105000.00", "Compras del hogar": "254000.00", Servicios: "85000.00" },
+    { period: "2026-05", Delivery: "144380.00", "Compras del hogar": "417472.90", Servicios: "85000.00", Suscripciones: "20000.00" }
   ],
+  fx_rate: {
+    from_currency: "USD",
+    to_currency: "ARS",
+    rate: "1000.0000",
+    source: "blue_average",
+    date: "2026-05-01",
+    is_fallback: false
+  },
   recurring_preview: [
     { description: "Movistar Hogar", expected_amount: "47759.99", currency: "ARS", cadence: "monthly" },
     { description: "OSDE", expected_amount: "202741.53", currency: "ARS", cadence: "monthly" }
@@ -122,21 +143,25 @@ export const demoImport: ImportBatch = {
   id: 1,
   filename: "bbva-demo.pdf",
   source_type: "bbva_visa_pdf",
+  uploaded_by_user_id: 1,
   statement_account: "0000000000",
   period_label: "28-May-26",
   status: "parsed",
   created_at: "2026-07-03T12:00:00",
+  paid_by_user_ids: [],
   lines: [
     {
       id: 101,
       date: "2026-05-12",
       description: "OPENAI *CHATGPT SUBSCR",
+      cardholder_name: "Mauro",
       coupon: "886716",
       kind: "purchase",
       currency: "USD",
       original_amount: "20.00",
       suggested_category_id: 4,
       suggested_subcategory_id: null,
+      suggested_recurring: true,
       status: "pending",
       duplicate_status: "new"
     },
@@ -144,12 +169,14 @@ export const demoImport: ImportBatch = {
       id: 102,
       date: "2026-05-28",
       description: "DB IVA $ 21%",
+      cardholder_name: "Mauro",
       coupon: null,
       kind: "tax",
       currency: "ARS",
       original_amount: "12095.80",
       suggested_category_id: null,
       suggested_subcategory_id: null,
+      suggested_recurring: false,
       status: "pending",
       duplicate_status: "new"
     }

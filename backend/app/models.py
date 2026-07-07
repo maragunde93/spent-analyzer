@@ -77,6 +77,8 @@ class Merchant(Base):
     display_name: Mapped[str] = mapped_column(String(160))
     normalized_name: Mapped[str] = mapped_column(String(160))
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
+    subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
+    is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Expense(Base):
@@ -139,6 +141,7 @@ class ImportLine(Base):
     home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
     date: Mapped[date] = mapped_column(Date)
     description: Mapped[str] = mapped_column(String(240))
+    cardholder_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     coupon: Mapped[str | None] = mapped_column(String(60), nullable=True)
     kind: Mapped[ImportLineKind] = mapped_column(SAEnum(ImportLineKind))
     currency: Mapped[Currency] = mapped_column(SAEnum(Currency))
@@ -146,6 +149,7 @@ class ImportLine(Base):
     suggested_category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     suggested_subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
     suggested_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="pending")
     fingerprint: Mapped[str] = mapped_column(String(128))
     raw_text: Mapped[str] = mapped_column(Text)
@@ -212,6 +216,7 @@ class ReceiptImport(Base):
     home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
     uploaded_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     expense_id: Mapped[int | None] = mapped_column(ForeignKey("expenses.id"), nullable=True)
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     filename: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(40), default="uploaded")
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -224,6 +229,9 @@ class ReceiptItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     receipt_import_id: Mapped[int] = mapped_column(ForeignKey("receipt_imports.id"), index=True)
     description: Mapped[str] = mapped_column(String(240))
+    subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
+    suggested_subcategory_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     quantity: Mapped[Decimal | None] = mapped_column(Numeric(14, 3), nullable=True)
     unit_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    status: Mapped[str] = mapped_column(String(40), default="accepted")

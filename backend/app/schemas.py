@@ -57,6 +57,15 @@ class CategoryUpdate(BaseModel):
     icon: str = "tag"
 
 
+class SubcategoryCreate(BaseModel):
+    category_id: int
+    name: str = Field(max_length=80)
+
+
+class SubcategoryUpdate(BaseModel):
+    name: str = Field(max_length=80)
+
+
 class ExpenseCreate(BaseModel):
     date: Date
     description: str
@@ -94,6 +103,15 @@ class ExpenseRead(ExpenseCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DashboardFxRate(BaseModel):
+    from_currency: Currency = Currency.USD
+    to_currency: Currency = Currency.ARS
+    rate: Decimal
+    source: str
+    date: Date | None = None
+    is_fallback: bool = False
+
+
 class DashboardSummary(BaseModel):
     total_ars: Decimal
     by_category: list[dict]
@@ -102,12 +120,14 @@ class DashboardSummary(BaseModel):
     monthly_by_category: list[dict] = []
     cumulative_by_category: list[dict] = []
     recurring_preview: list[dict]
+    fx_rate: DashboardFxRate | None = None
 
 
 class ImportLineRead(BaseModel):
     id: int
     date: Date
     description: str
+    cardholder_name: str | None = None
     coupon: str | None
     kind: ImportLineKind
     currency: Currency
@@ -115,6 +135,7 @@ class ImportLineRead(BaseModel):
     suggested_category_id: int | None
     suggested_subcategory_id: int | None
     suggested_recurring: bool = False
+    notes: str | None = Field(default=None, max_length=500)
     status: str
     duplicate_status: str = "new"
 
@@ -125,19 +146,25 @@ class ImportBatchRead(BaseModel):
     id: int
     filename: str
     source_type: str
+    uploaded_by_user_id: int
     statement_account: str | None
     period_label: str | None
     status: str
     created_at: str | None = None
+    paid_by_user_ids: list[int] = []
     lines: list[ImportLineRead] = []
 
 
 class ImportCommitRequest(BaseModel):
     line_ids: list[int]
     paid_by_user_id: int
+    paid_by_overrides: dict[int, int] = {}
+    rejected_line_ids: list[int] = []
     category_overrides: dict[int, int | None] = {}
     subcategory_overrides: dict[int, int | None] = {}
     recurring_overrides: dict[int, bool] = {}
+    note_overrides: dict[int, str | None] = {}
+    reimbursement_overrides: dict[int, bool] = {}
 
 
 class CashWalletEntryCreate(BaseModel):
@@ -172,9 +199,46 @@ class AuditLogRead(BaseModel):
     created_at: str
 
 
+class ReceiptItemRead(BaseModel):
+    id: int
+    description: str
+    subcategory_id: int | None = None
+    suggested_subcategory_name: str | None = None
+    quantity: Decimal | None
+    unit_price: Decimal | None
+    total_amount: Decimal
+    status: str = "accepted"
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReceiptItemReview(BaseModel):
+    id: int
+    description: str = Field(max_length=240)
+    subcategory_id: int | None = None
+    suggested_subcategory_name: str | None = Field(default=None, max_length=80)
+    quantity: Decimal | None = None
+    unit_price: Decimal | None = None
+    total_amount: Decimal
+    accepted: bool = True
+
+
+class ReceiptReviewRequest(BaseModel):
+    category_id: int | None = None
+    items: list[ReceiptItemReview]
+
+
+class ReceiptAssociationRequest(BaseModel):
+    expense_id: int
+    category_id: int | None = None
+
+
 class ReceiptImportRead(BaseModel):
     id: int
     expense_id: int | None
+    category_id: int | None = None
     filename: str
     status: str
     created_at: str
+    parsed_total: Decimal | None = None
+    items: list[ReceiptItemRead] = []

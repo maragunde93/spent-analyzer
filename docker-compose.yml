@@ -23,6 +23,12 @@ services:
       SPENT_DATABASE_URL: postgresql+psycopg://spent:spent_dev_password@postgres:5432/spent_analyzer
       SPENT_CORS_ORIGINS: '["http://localhost:5173","http://localhost:8080"]'
       SPENT_TEST_AUTH_ENABLED: "true"
+      SPENT_SEED_DEMO_DATA: "false"
+      SPENT_GEMINI_API_KEY: ${SPENT_GEMINI_API_KEY:-}
+      SPENT_GEMINI_MODEL: ${SPENT_GEMINI_MODEL:-gemini-3.5-flash}
+      SPENT_FX_AUTO_UPDATE_ENABLED: "true"
+      SPENT_FX_API_URL: ${SPENT_FX_API_URL:-https://dolarapi.com/v1/dolares/blue}
+      SPENT_FX_UPDATE_HOUR_ARGENTINA: "11"
     depends_on:
       postgres:
         condition: service_healthy

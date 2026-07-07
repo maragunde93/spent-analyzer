@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -8,8 +8,8 @@ import {
   ChevronDown,
   ChevronRight,
   CircleDollarSign,
+  Copy,
   ClipboardList,
-  FlaskConical,
   History as HistoryIcon,
   Home,
   MessageSquare,
@@ -29,7 +29,7 @@ import {
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "./api";
 import { categories as fallbackCategories, users as fallbackUsers } from "./mockData";
-import type { Category, Currency, Expense, ExpenseSource, ImportBatch, ImportLine, User } from "./types";
+import type { Category, Currency, Expense, ExpenseSource, ImportBatch, ImportLine, ReceiptImport, ReceiptItem, User } from "./types";
 
 function money(value: string | number, currency = "ARS") {
   return new Intl.NumberFormat("es-AR", {
@@ -44,7 +44,29 @@ function numberFormat(value: string | number) {
   return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(Number(value));
 }
 
+function fxSourceLabel(source?: string) {
+  return {
+    blue_average: "Dolar blue promedio",
+    fallback_local: "Fallback local"
+  }[source ?? ""] ?? source ?? "Sin fuente";
+}
+
 const chartColors = ["#334155", "#475569", "#64748b", "#71717a", "#94a3b8", "#0ea5e9", "#2563eb", "#60a5fa", "#38bdf8", "#ef4444"];
+const noDashboardCategoriesSelected = -1;
+const legendOrder = [
+  "Delivery",
+  "Compras del hogar",
+  "Servicios",
+  "Suscripciones",
+  "Salud",
+  "Auto",
+  "Transporte",
+  "Ocio / gasto personal",
+  "Vacaciones",
+  "Vestimenta",
+  "Regalos",
+  "Sin categoria"
+];
 
 function toChartRows(rows: Array<Record<string, string>>) {
   return rows.map((row) =>
@@ -89,6 +111,11 @@ function sortKeysByFinalAmount(rows: Array<Record<string, string | number>>, key
 
 function categoryNames(categories: Array<Pick<Category, "name">>) {
   return categories.map((category) => category.name);
+}
+
+function sortLegendNames(names: string[]) {
+  const order = new Map(legendOrder.map((name, index) => [name, index]));
+  return [...names].sort((a, b) => (order.get(a) ?? 999) - (order.get(b) ?? 999) || a.localeCompare(b));
 }
 
 function monthPeriods(year: number) {
@@ -159,6 +186,58 @@ function groupExpensesByMonth(expenses: Expense[]) {
   }, {});
 }
 
+function totalsByCurrency(expenses: Expense[]) {
+  return expenses.reduce<Record<Currency, number>>((acc, expense) => {
+    acc[expense.currency] = (acc[expense.currency] ?? 0) + Number(expense.original_amount);
+    return acc;
+  }, {} as Record<Currency, number>);
+}
+
+function formatCurrencyTotals(totals: Partial<Record<Currency, number>>) {
+  return (["ARS", "USD"] as Currency[])
+    .filter((currency) => Math.abs(totals[currency] ?? 0) > 0)
+    .map((currency) => money(totals[currency] ?? 0, currency))
+    .join(" / ") || money(0);
+}
+
+type ExpenseSortKey = "date" | "description" | "paid_by" | "category" | "source" | "recurring" | "amount" | "notes";
+type ExpenseSort = { key: ExpenseSortKey; direction: "asc" | "desc" };
+
+function sortIndicator(sort: ExpenseSort, key: ExpenseSortKey) {
+  if (sort.key !== key) return "";
+  return sort.direction === "asc" ? " ↑" : " ↓";
+}
+
+function compareExpenseValues(a: string | number | boolean, b: string | number | boolean) {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  if (typeof a === "boolean" && typeof b === "boolean") return Number(a) - Number(b);
+  return String(a).localeCompare(String(b), "es-AR", { sensitivity: "base" });
+}
+
+function expenseSortValue(expense: Expense, key: ExpenseSortKey, categories: Category[], users: User[]) {
+  const category = categories.find((item) => item.id === expense.category_id);
+  const subcategory = category?.subcategories?.find((item) => item.id === expense.subcategory_id);
+  const user = users.find((item) => item.id === expense.paid_by_user_id);
+  return {
+    date: expense.date,
+    description: expense.description,
+    paid_by: user?.display_name ?? "",
+    category: `${category?.name ?? "Sin categoria"} ${subcategory?.name ?? ""}`,
+    source: sourceLabel(expense.source),
+    recurring: !!expense.is_recurring,
+    amount: Number(expense.original_amount),
+    notes: expense.notes ?? ""
+  }[key];
+}
+
+function sortExpenses(expenses: Expense[], sort: ExpenseSort, categories: Category[], users: User[]) {
+  return [...expenses].sort((a, b) => {
+    const comparison = compareExpenseValues(expenseSortValue(a, sort.key, categories, users), expenseSortValue(b, sort.key, categories, users));
+    if (comparison !== 0) return sort.direction === "asc" ? comparison : -comparison;
+    return b.id - a.id;
+  });
+}
+
 function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: string[]) {
   return rows.map((row, index) => {
     const previous = rows[index - 1];
@@ -174,7 +253,40 @@ function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: s
   });
 }
 
-function importTotals(lines: ImportLine[], selected: number[], sourceType?: string) {
+function importSourceLabel(batch: Pick<ImportBatch, "source_type" | "filename">) {
+  const filename = batch.filename.toLowerCase();
+  if (batch.source_type === "bbva_account_xls") return "Statement cuenta";
+  if (filename.includes("master")) return "Statement tarjeta master";
+  return "Statement tarjeta visa";
+}
+
+function buildImportCoverage(imports: ImportBatch[], users: User[]) {
+  const rows = new Map<string, { source: string; uploadedByUserId: number; paidByUserId: number | null; months: Record<string, "Pendiente" | "Procesado"> }>();
+  const years = new Set<number>();
+  for (const batch of imports) {
+    const source = importSourceLabel(batch);
+    const periods = new Set(batch.lines.length ? batch.lines.map((line) => line.date.slice(0, 7)) : batch.created_at ? [batch.created_at.slice(0, 7)] : []);
+    const isProcessed = batch.status === "committed" || batch.lines.some((line) => line.status === "committed" || line.status === "ignored");
+    const paidByIds = batch.paid_by_user_ids.length ? batch.paid_by_user_ids : [null];
+    for (const paidByUserId of paidByIds) {
+      const key = `${source}:${batch.uploaded_by_user_id}:${paidByUserId ?? "pending"}`;
+      if (!rows.has(key)) rows.set(key, { source, uploadedByUserId: batch.uploaded_by_user_id, paidByUserId, months: {} });
+      const row = rows.get(key)!;
+      for (const period of periods) {
+        const year = Number(period.slice(0, 4));
+        if (year) years.add(year);
+        row.months[period] = row.months[period] === "Procesado" || isProcessed ? "Procesado" : "Pendiente";
+      }
+    }
+  }
+  const userOrder = new Map(users.map((user, index) => [user.id, index]));
+  return {
+    years: Array.from(years).sort((a, b) => b - a),
+    rows: Array.from(rows.values()).sort((a, b) => a.source.localeCompare(b.source) || (userOrder.get(a.uploadedByUserId) ?? 999) - (userOrder.get(b.uploadedByUserId) ?? 999) || (userOrder.get(a.paidByUserId ?? -1) ?? 999) - (userOrder.get(b.paidByUserId ?? -1) ?? 999))
+  };
+}
+
+function importTotals(lines: ImportLine[], selected: number[], sourceType?: string, reimbursementByLine: Record<number, boolean> = {}) {
   const totals = {
     total: {} as Record<string, number>,
     income: {} as Record<string, number>,
@@ -185,35 +297,122 @@ function importTotals(lines: ImportLine[], selected: number[], sourceType?: stri
     const amount = Number(line.original_amount);
     totals.total[line.currency] = (totals.total[line.currency] ?? 0) + amount;
     if (sourceType === "bbva_account_xls") {
-      if (line.kind === "income") totals.income[line.currency] = (totals.income[line.currency] ?? 0) + Math.abs(amount);
+      if (line.kind === "income" && !reimbursementByLine[line.id]) totals.income[line.currency] = (totals.income[line.currency] ?? 0) + Math.abs(amount);
       else totals.expense[line.currency] = (totals.expense[line.currency] ?? 0) + Math.abs(amount);
     }
   }
   return totals;
 }
 
-function orderedImportLines(lines: ImportLine[]) {
+function cardholderKey(line: Pick<ImportLine, "cardholder_name">) {
+  return (line.cardholder_name?.trim() || "Titular").replace(/\s+/g, " ").toUpperCase();
+}
+
+function cardholderLabel(line: Pick<ImportLine, "cardholder_name">) {
+  return line.cardholder_name?.trim() || "Titular";
+}
+
+function userIdForCardholder(name: string, users: User[], fallback: string) {
+  const normalizedName = name.toLowerCase();
+  const matched = users.find((user) => {
+    const display = user.display_name.toLowerCase();
+    return normalizedName.includes(display) || display.split(/\s+/).some((part) => part.length > 2 && normalizedName.includes(part));
+  });
+  return String(matched?.id ?? fallback);
+}
+
+function orderedImportLines(lines: ImportLine[], sourceType?: string) {
+  if (sourceType === "bbva_account_xls") {
+    return [...lines].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
+  }
   const currencyOrder: Record<Currency, number> = { USD: 0, ARS: 1 };
   return [...lines].sort((a, b) => {
+    const holderDiff = cardholderKey(a).localeCompare(cardholderKey(b));
+    if (holderDiff) return holderDiff;
     const currencyDiff = currencyOrder[a.currency] - currencyOrder[b.currency];
     if (currencyDiff) return currencyDiff;
     return a.id - b.id;
   });
 }
 
+function importLinePeriod(line: ImportLine) {
+  return line.date.slice(0, 7);
+}
+
+function importMonthTotals(lines: ImportLine[], selected: number[], period: string, reimbursementByLine: Record<number, boolean>) {
+  return importTotals(lines.filter((line) => importLinePeriod(line) === period), selected, "bbva_account_xls", reimbursementByLine);
+}
+
+function importMonthCurrencies(lines: ImportLine[], period: string) {
+  return Array.from(new Set(lines.filter((line) => importLinePeriod(line) === period).map((line) => line.currency)));
+}
+
+function importShareText(lines: ImportLine[], selected: number[], sourceType?: string) {
+  const selectedLines = orderedImportLines(lines, sourceType).filter((line) => selected.includes(line.id) && !isIgnoredImportLine(line));
+  const totals = importTotals(selectedLines, selected, sourceType);
+  const header = [
+    `Total ARS: ${money(Math.abs(totals.total.ARS ?? 0), "ARS")}`,
+    `Total USD: ${money(Math.abs(totals.total.USD ?? 0), "USD")}`
+  ].join(" ");
+  const details = selectedLines.map((line) => `${line.description} - ${money(line.original_amount, line.currency)}`);
+  return [header, ...details].join("\n");
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+function ImportMonthTotals({ lines, selected, period, reimbursementByLine }: { lines: ImportLine[]; selected: number[]; period: string; reimbursementByLine: Record<number, boolean> }) {
+  const totals = importMonthTotals(lines, selected, period, reimbursementByLine);
+  const currencies = importMonthCurrencies(lines, period);
+  return (
+    <div className="import-totals month-totals" aria-label={`Totales ${period}`}>
+      {currencies.includes("ARS") && (
+        <>
+          <span>Ingresos ARS <strong>{money(totals.income.ARS ?? 0, "ARS")}</strong></span>
+          <span>Egresos ARS <strong>{money(totals.expense.ARS ?? 0, "ARS")}</strong></span>
+        </>
+      )}
+      {currencies.includes("USD") && (
+        <>
+          <span>Ingresos USD <strong>{money(totals.income.USD ?? 0, "USD")}</strong></span>
+          <span>Egresos USD <strong>{money(totals.expense.USD ?? 0, "USD")}</strong></span>
+        </>
+      )}
+    </div>
+  );
+}
+
 function categoryColor(name: string, categories: Array<Pick<Category, "name" | "color">>, keys: string[]) {
   return categories.find((category) => category.name === name)?.color ?? chartColors[Math.max(keys.indexOf(name), 0) % chartColors.length];
+}
+
+function categoryOpacity(active: string | null, name: string) {
+  return active && active !== name ? 0.18 : 1;
 }
 
 export function App() {
   const [section, setSection] = useState("dashboard");
   const [query, setQuery] = useState("");
   const [paidBy, setPaidBy] = useState("all");
+  const [dashboardCategoryIds, setDashboardCategoryIds] = useState<number[]>([]);
   const queryClient = useQueryClient();
   const households = useQuery({ queryKey: ["households"], queryFn: api.households });
   const homeId = households.data?.[0]?.id ?? 1;
   const members = useQuery({ queryKey: ["members", homeId], queryFn: () => api.members(homeId) });
-  const dashboard = useQuery({ queryKey: ["dashboard", homeId, paidBy], queryFn: () => api.dashboard(homeId, paidBy) });
+  const dashboard = useQuery({ queryKey: ["dashboard", homeId, paidBy, dashboardCategoryIds.join(",")], queryFn: () => api.dashboard(homeId, paidBy, dashboardCategoryIds) });
   const expenses = useQuery({ queryKey: ["expenses", homeId], queryFn: () => api.expenses(homeId) });
   const categoryQuery = useQuery({ queryKey: ["categories", homeId], queryFn: () => api.categories(homeId) });
   const cats = categoryQuery.data ?? fallbackCategories;
@@ -247,7 +446,8 @@ export function App() {
     return (expenses.data ?? []).filter((expense) => {
       const category = cats.find((cat) => cat.id === expense.category_id);
       const subcategory = category?.subcategories?.find((item) => item.id === expense.subcategory_id);
-      const haystack = `${expense.description} ${category?.name ?? ""} ${subcategory?.name ?? ""}`.toLowerCase();
+      const categoryName = category?.name ?? "Sin categoria";
+      const haystack = `${expense.description} ${categoryName} ${subcategory?.name ?? ""}`.toLowerCase();
       const matchesText = haystack.includes(query.toLowerCase());
       const matchesUser = paidBy === "all" || String(expense.paid_by_user_id) === paidBy;
       return matchesText && matchesUser;
@@ -270,7 +470,7 @@ export function App() {
           <NavButton active={section === "imports"} icon={<Upload />} label="Importaciones" onClick={() => setSection("imports")} />
           <NavButton active={section === "cash"} icon={<WalletCards />} label="Efectivo" onClick={() => setSection("cash")} />
           <NavButton active={section === "history"} icon={<HistoryIcon />} label="Historial" onClick={() => setSection("history")} />
-          <NavButton active={section === "receipts"} icon={<FlaskConical />} label="Tickets" onClick={() => setSection("receipts")} />
+          <NavButton active={section === "receipts"} icon={<ClipboardList />} label="Tickets" onClick={() => setSection("receipts")} />
           <NavButton active={section === "settings"} icon={<Settings />} label="Casa" onClick={() => setSection("settings")} />
         </nav>
         <div className="soon">
@@ -287,11 +487,21 @@ export function App() {
             <h1>{titleFor(section)}</h1>
           </div>
           <div className="top-actions">
+            {section === "dashboard" && dashboard.data?.fx_rate && <FxRateBadge fxRate={dashboard.data.fx_rate} />}
             <button className="icon-button" title="Alertas"><Bell size={18} /></button>
-            <button className="primary" onClick={() => setSection("expenses")}><Plus size={18} /> Nuevo gasto</button>
           </div>
         </header>
-        {section === "dashboard" && <Dashboard categories={cats} data={dashboard.data} users={people} paidBy={paidBy} setPaidBy={setPaidBy} />}
+        {section === "dashboard" && (
+          <Dashboard
+            categories={cats}
+            data={dashboard.data}
+            users={people}
+            paidBy={paidBy}
+            setPaidBy={setPaidBy}
+            categoryIds={dashboardCategoryIds}
+            setCategoryIds={setDashboardCategoryIds}
+          />
+        )}
         {section === "expenses" && (
           <Expenses
             categories={cats}
@@ -309,7 +519,7 @@ export function App() {
         {section === "imports" && <Imports categories={cats} users={people} homeId={homeId} />}
         {section === "cash" && <CashWallet users={people} homeId={homeId} />}
         {section === "history" && <HistoryPanel users={people} homeId={homeId} />}
-        {section === "receipts" && <ReceiptsLab expenses={expenses.data ?? []} homeId={homeId} />}
+        {section === "receipts" && <ReceiptsLab categories={cats} expenses={expenses.data ?? []} homeId={homeId} />}
         {section === "settings" && <SettingsPanel categories={cats} users={people} homeId={homeId} />}
       </main>
     </div>
@@ -332,9 +542,25 @@ function titleFor(section: string) {
     imports: "Importar resumen",
     cash: "Billetera de efectivo",
     history: "Historial",
-    receipts: "Tickets de supermercado",
+    receipts: "Tickets de compras",
     settings: "Configuracion de casa"
   }[section];
+}
+
+function FxRateBadge({
+  fxRate
+}: {
+  fxRate: NonNullable<Awaited<ReturnType<typeof api.dashboard>>["fx_rate"]>;
+}) {
+  return (
+    <div className="fx-rate-badge" aria-label="Tipo de cambio Blue usado para conversiones">
+      <div>
+        <span>Tipo de cambio Blue</span>
+        <small>{fxRate.date ?? "sin fecha"}{fxRate.is_fallback ? " - sin cotizacion cargada" : ""}</small>
+      </div>
+      <strong>US$ 1 = {money(fxRate.rate, "ARS")}</strong>
+    </div>
+  );
 }
 
 function Dashboard({
@@ -342,57 +568,47 @@ function Dashboard({
   data,
   users,
   paidBy,
-  setPaidBy
+  setPaidBy,
+  categoryIds,
+  setCategoryIds
 }: {
-  categories: Array<Pick<Category, "name" | "color">>;
+  categories: Array<Pick<Category, "id" | "name" | "color">>;
   data?: Awaited<ReturnType<typeof api.dashboard>>;
   users: User[];
   paidBy: string;
   setPaidBy: (value: string) => void;
+  categoryIds: number[];
+  setCategoryIds: (value: number[]) => void;
 }) {
   const [activeMonthlyCategory, setActiveMonthlyCategory] = useState<string | null>(null);
+  const [activeLegendCategory, setActiveLegendCategory] = useState<string | null>(null);
+  const [expandedRecurring, setExpandedRecurring] = useState<Record<string, boolean>>({});
   const currentYear = new Date().getFullYear();
   const currentMonth = new Date().toISOString().slice(0, 7);
   const periods = monthPeriods(currentYear);
   const rawMonthlyData = toChartRows(data?.monthly_by_category ?? []);
   const baseMonthlyKeys = Array.from(new Set([...categoryNames(categories), ...chartKeys(rawMonthlyData)]));
-  const legendKeys = categoryNames(categories).filter((name) => baseMonthlyKeys.includes(name));
+  const categoryKeys = categoryNames(categories).filter((name) => baseMonthlyKeys.includes(name));
+  const legendKeys = sortLegendNames(categoryKeys);
   const monthlyData = fillMonthlyRows(rawMonthlyData, periods, baseMonthlyKeys);
   const monthlyStackData = buildSortedStackRows(rawMonthlyData, periods, baseMonthlyKeys);
   const rawCumulativeData = toChartRows(data?.cumulative_by_category ?? []);
   const cumulativeKeys = sortKeysByFinalAmount(rawCumulativeData, orderedKeysByFirstValue(rawCumulativeData, categories));
   const cumulativeData = fillCumulativeRows(rawCumulativeData, periods, cumulativeKeys);
-  const deltaRows = categoryDeltaRows(monthlyData, legendKeys);
+  const deltaRows = categoryDeltaRows(monthlyData, categoryKeys);
   const currentMonthRow = monthlyData.find((item) => item.period === currentMonth);
-  const currentMonthKeys = sortKeysByPeriodAmount(monthlyData, currentMonth, legendKeys, true);
+  const currentMonthKeys = sortKeysByPeriodAmount(monthlyData, currentMonth, categoryKeys, true);
   const chartData = currentMonthKeys.map((name) => ({ name, amount_ars: Number(currentMonthRow?.[name] ?? 0) }));
   const currentMonthTotal = chartData.reduce((sum, item) => sum + item.amount_ars, 0);
+  const allCategoryIds = categories.map((category) => Number(category.id));
+  const noCategoriesSelected = categoryIds.includes(noDashboardCategoriesSelected);
+  const activeChartCategory = activeLegendCategory ?? activeMonthlyCategory;
+  const toggleLegendCategory = (name: string) => setActiveLegendCategory((current) => (current === name ? null : name));
   return (
     <section className="grid dashboard-grid">
-      <div className="dashboard-filter">
-        <select value={paidBy} onChange={(event) => setPaidBy(event.target.value)} aria-label="Filtrar resumen por usuario">
-          <option value="all">Todo el hogar</option>
-          {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
-        </select>
-      </div>
-      <div className="metric">
-        <span>Consumo del mes actual</span>
-        <strong>{money(currentMonthTotal)}</strong>
-        <small>ARS con USD convertido por dolar blue promedio</small>
-      </div>
-      <div className="panel">
-        <h2>Proyeccion recurrente</h2>
-        <div className="stack">
-          {(data?.recurring_preview ?? []).map((item) => (
-            <div className="list-row" key={item.description}>
-              <span>{item.description}</span>
-              <strong>{money(item.expected_amount, item.currency)}</strong>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="panel chart-panel wide">
+      <div className="panel chart-panel">
         <h2>Consumo mes actual</h2>
+        <div className="chart-total">{money(currentMonthTotal)}</div>
         <ResponsiveContainer width="100%" height={280}>
           <BarChart data={chartData} margin={{ left: 8, right: 24 }}>
             <CartesianGrid stroke="#223047" vertical={false} />
@@ -400,18 +616,79 @@ function Dashboard({
             <YAxis tickFormatter={(value) => numberFormat(value)} tick={{ fill: "#94a3b8", fontSize: 12 }} />
             <Tooltip
               formatter={(value) => [money(Number(value)), "Consumo"]}
+              cursor={false}
               contentStyle={{ background: "#0f172a", border: "1px solid #263449", color: "#e2e8f0" }}
               itemStyle={{ color: "#e2e8f0" }}
               labelStyle={{ color: "#e2e8f0" }}
             />
-            <Bar dataKey="amount_ars" name="Consumo" radius={[4, 4, 0, 0]}>
-              {chartData.map((item) => <Cell key={item.name} fill={categoryColor(item.name, categories, currentMonthKeys)} />)}
+            <Bar dataKey="amount_ars" name="Consumo" radius={[4, 4, 0, 0]} isAnimationActive={false} activeBar={false}>
+              {chartData.map((item) => (
+                <Cell
+                  key={item.name}
+                  fill={categoryColor(item.name, categories, currentMonthKeys)}
+                  fillOpacity={categoryOpacity(activeChartCategory, item.name)}
+                  stroke={activeChartCategory === item.name ? "#f8fafc" : undefined}
+                  strokeWidth={activeChartCategory === item.name ? 2 : 0}
+                />
+              ))}
             </Bar>
           </BarChart>
         </ResponsiveContainer>
-        <CategoryLegend categories={categories} names={legendKeys} />
+        <CategoryLegend categories={categories} names={legendKeys} active={activeChartCategory} onToggle={toggleLegendCategory} />
       </div>
-      <div className="panel chart-panel wide">
+      <div className="panel dashboard-filters">
+        <h2>Filtros</h2>
+        <div className="filter-summary-row">
+          <label>
+            <span>Vista</span>
+            <select value={paidBy} onChange={(event) => setPaidBy(event.target.value)} aria-label="Filtrar resumen por usuario">
+              <option value="all">Todo el hogar</option>
+              {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="filter-checks" aria-label="Filtrar resumen por categorias">
+          <div className="filter-heading">
+            <span>Categorias</span>
+            <div className="filter-actions">
+              <button className="text-button" onClick={() => setCategoryIds([])} disabled={!categoryIds.length}>Todas</button>
+              <button className="text-button" onClick={() => setCategoryIds([noDashboardCategoriesSelected])} disabled={noCategoriesSelected}>Limpiar</button>
+            </div>
+          </div>
+          <div className="filter-grid">
+          {sortLegendNames(categories.map((category) => category.name)).map((categoryName) => {
+            const category = categories.find((item) => item.name === categoryName);
+            if (!category) return null;
+            const categoryId = Number(category.id);
+            return (
+            <label key={category.name} className="check-row">
+              <input
+                type="checkbox"
+                aria-label={`Categoria ${category.name}`}
+                checked={!noCategoriesSelected && (!categoryIds.length || categoryIds.includes(categoryId))}
+                onChange={(event) => {
+                  if (event.target.checked) {
+                    if (noCategoriesSelected) {
+                      setCategoryIds([categoryId]);
+                    } else {
+                      setCategoryIds(categoryIds.length ? [...categoryIds, categoryId] : allCategoryIds);
+                    }
+                  } else {
+                    const current = categoryIds.length ? categoryIds.filter((id) => id !== noDashboardCategoriesSelected) : allCategoryIds;
+                    const next = current.filter((item) => item !== categoryId);
+                    setCategoryIds(next.length ? next : [noDashboardCategoriesSelected]);
+                  }
+                }}
+              />
+              <i style={{ background: category.color }} />
+              {category.name}
+            </label>
+            );
+          })}
+          </div>
+        </div>
+      </div>
+      <div className="panel chart-panel wide" data-testid="monthly-chart-panel">
         <h2>Consumo mensual {currentYear}</h2>
         <ResponsiveContainer width="100%" height={280}>
           <BarChart data={monthlyStackData} onMouseLeave={() => setActiveMonthlyCategory(null)}>
@@ -419,21 +696,25 @@ function Dashboard({
             <XAxis dataKey="period_label" tick={{ fill: "#94a3b8", fontSize: 12 }} />
             <YAxis tickFormatter={(value) => numberFormat(value)} tick={{ fill: "#94a3b8", fontSize: 12 }} />
             <Tooltip
-              shared={false}
-              content={<MonthlySegmentTooltip />}
+              content={<MonthlySegmentTooltip activeCategory={activeMonthlyCategory} />}
+              cursor={false}
               contentStyle={{ background: "#0f172a", border: "1px solid #263449", color: "#e2e8f0" }}
               itemStyle={{ color: "#e2e8f0" }}
               labelStyle={{ color: "#e2e8f0" }}
             />
             {baseMonthlyKeys.map((_, slotIndex) => (
-              <Bar key={slotIndex} dataKey={`slot_${slotIndex}`} stackId="month">
+              <Bar key={slotIndex} dataKey={`slot_${slotIndex}`} stackId="month" isAnimationActive={false} activeBar={false}>
                 {monthlyStackData.map((row) => {
                   const category = String(row[`slot_${slotIndex}_category`] ?? "");
+                  const value = Number(row[`slot_${slotIndex}`] ?? 0);
                   return (
                     <Cell
                       key={`${row.period}-${slotIndex}`}
+                      data-testid={value ? "monthly-segment" : undefined}
                       fill={categoryColor(category, categories, legendKeys)}
-                      fillOpacity={activeMonthlyCategory && activeMonthlyCategory !== category ? 0.24 : 1}
+                      fillOpacity={categoryOpacity(activeChartCategory, category)}
+                      stroke={activeChartCategory === category ? "#f8fafc" : undefined}
+                      strokeWidth={activeChartCategory === category ? 1 : 0}
                       onMouseEnter={() => setActiveMonthlyCategory(category)}
                     />
                   );
@@ -442,7 +723,84 @@ function Dashboard({
             ))}
           </BarChart>
         </ResponsiveContainer>
-        <CategoryLegend categories={categories} names={legendKeys} active={activeMonthlyCategory} />
+        <CategoryLegend categories={categories} names={legendKeys} active={activeChartCategory} onToggle={toggleLegendCategory} />
+      </div>
+      <div className="panel recurring-panel wide">
+        <h2>Proyeccion recurrente</h2>
+        {(data?.recurring_preview ?? []).length ? (
+          <div className="recurring-table-wrap">
+            <table className="recurring-table">
+              <colgroup>
+                <col className="recurring-name-col" />
+                <col className="recurring-category-col" />
+                <col className="recurring-subcategory-col" />
+                <col className="recurring-month-col" />
+                <col className="recurring-money-col" />
+                <col className="recurring-money-col" />
+                <col className="recurring-money-col" />
+                <col className="recurring-money-col" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Categoria</th>
+                  <th>Subcategoria</th>
+                  <th>Ultimo mes</th>
+                  <th>Ultimo consumo</th>
+                  <th>Promedio mensual</th>
+                  <th>Acumulado</th>
+                  <th>Proyeccion anualizada</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.recurring_preview ?? []).map((item, index) => {
+                  const rowKey = `${item.description}-${item.category ?? ""}-${item.subcategory ?? ""}-${index}`;
+                  const monthly = Number(item.monthly_average ?? item.expected_amount);
+                  const lastAmount = Number(item.last_amount ?? item.expected_amount);
+                  const accumulated = Number(item.accumulated_amount ?? monthly);
+                  const annualized = Number(item.annualized_amount ?? monthly * 12);
+                  const itemCount = item.items?.length ?? 0;
+                  return (
+                    <Fragment key={rowKey}>
+                      <tr>
+                        <td>
+                          <button
+                            className="link-button recurring-name"
+                            onClick={() => setExpandedRecurring((current) => ({ ...current, [rowKey]: !current[rowKey] }))}
+                            disabled={!itemCount}
+                            type="button"
+                          >
+                            {expandedRecurring[rowKey] ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                            {item.description}
+                          </button>
+                        </td>
+                        <td>{item.category ?? "Sin categoria"}</td>
+                        <td>{item.subcategory ?? "-"}</td>
+                        <td>{item.last_period ? axisMonthLabel(item.last_period) : "-"}</td>
+                        <td>{money(lastAmount, item.currency)}</td>
+                        <td>{money(monthly, item.currency)}</td>
+                        <td>{money(accumulated, item.currency)}</td>
+                        <td><strong>{money(annualized, item.currency)}</strong></td>
+                      </tr>
+                      {expandedRecurring[rowKey] && item.items?.map((expense) => (
+                        <tr className="recurring-detail-row" key={`${rowKey}-${expense.date}-${expense.description}-${expense.amount}`}>
+                          <td>{expense.date} - {expense.description}</td>
+                          <td></td>
+                          <td></td>
+                          <td></td>
+                          <td>{money(expense.amount, expense.currency)}</td>
+                          <td>{money(expense.amount_ars, "ARS")}</td>
+                          <td></td>
+                          <td></td>
+                        </tr>
+                      ))}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="muted">Todavia no hay consumos marcados como recurrentes.</p>}
       </div>
       <div className="panel chart-panel wide">
         <h2>Consumo acumulado {currentYear}</h2>
@@ -453,16 +811,29 @@ function Dashboard({
             <YAxis tickFormatter={(value) => numberFormat(value)} tick={{ fill: "#94a3b8", fontSize: 12 }} />
             <Tooltip
               formatter={(value, name) => [money(Number(value)), String(name)]}
+              cursor={false}
+              wrapperStyle={{ zIndex: 20, transform: "translateY(-18px)" }}
               contentStyle={{ background: "#0f172a", border: "1px solid #263449", color: "#e2e8f0" }}
               itemStyle={{ color: "#e2e8f0" }}
               labelStyle={{ color: "#e2e8f0" }}
             />
             {cumulativeKeys.map((key) => (
-              <Area key={key} type="monotone" dataKey={key} stackId="year" stroke={categoryColor(key, categories, cumulativeKeys)} fill={categoryColor(key, categories, cumulativeKeys)} fillOpacity={0.78} />
+              <Area
+                key={key}
+                type="monotone"
+                dataKey={key}
+                stackId="year"
+                stroke={categoryColor(key, categories, cumulativeKeys)}
+                strokeOpacity={activeChartCategory && activeChartCategory !== key ? 0.22 : 1}
+                fill={categoryColor(key, categories, cumulativeKeys)}
+                fillOpacity={activeChartCategory && activeChartCategory !== key ? 0.12 : 0.78}
+                isAnimationActive={false}
+                activeDot={false}
+              />
             ))}
           </AreaChart>
         </ResponsiveContainer>
-        <CategoryLegend categories={categories} names={legendKeys.filter((name) => cumulativeKeys.includes(name))} />
+        <CategoryLegend categories={categories} names={legendKeys.filter((name) => cumulativeKeys.includes(name))} active={activeChartCategory} onToggle={toggleLegendCategory} />
       </div>
       <div className="panel chart-panel wide">
         <h2>Variacion mensual por categoria {currentYear}</h2>
@@ -475,7 +846,7 @@ function Dashboard({
               </tr>
             </thead>
             <tbody>
-              {legendKeys.map((key) => (
+              {categoryKeys.map((key) => (
                 <tr key={key}>
                   <td>{key}</td>
                   {periods.map((period) => {
@@ -498,29 +869,53 @@ function Dashboard({
   );
 }
 
-function MonthlySegmentTooltip({ active, payload }: { active?: boolean; payload?: Array<{ value?: number; payload?: Record<string, string | number>; dataKey?: string }> }) {
-  if (!active || !payload?.length) return null;
-  const item = payload[0];
-  const slot = String(item.dataKey ?? "");
-  const category = item.payload?.[`${slot}_category`];
-  if (!category || !Number(item.value ?? 0)) return null;
+function MonthlySegmentTooltip({
+  active,
+  payload,
+  activeCategory
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: Record<string, string | number> }>;
+  activeCategory?: string | null;
+}) {
+  if (!active || !payload?.length || !activeCategory) return null;
+  const row = payload[0].payload ?? {};
+  const slot = Object.keys(row).find((key) => key.startsWith("slot_") && !key.endsWith("_category") && row[`${key}_category`] === activeCategory);
+  const value = slot ? Number(row[slot] ?? 0) : 0;
+  if (!value) return null;
   return (
-    <div className="chart-tooltip">
-      <strong>{String(category)}</strong>
-      <span>{money(Number(item.value))}</span>
+    <div className="chart-tooltip" role="tooltip">
+      <strong>{activeCategory}</strong>
+      <span>{money(value)}</span>
     </div>
   );
 }
 
-function CategoryLegend({ categories, names, active }: { categories: Array<Pick<Category, "name" | "color">>; names: string[]; active?: string | null }) {
+function CategoryLegend({
+  categories,
+  names,
+  active,
+  onToggle
+}: {
+  categories: Array<Pick<Category, "name" | "color">>;
+  names: string[];
+  active?: string | null;
+  onToggle?: (name: string) => void;
+}) {
   if (!names.length) return null;
   return (
     <div className="chart-legend" aria-label="Leyenda de categorias">
       {names.map((name) => (
-        <span key={name} className={active && active !== name ? "dimmed" : undefined}>
+        <button
+          key={name}
+          className={active && active !== name ? "dimmed" : undefined}
+          onClick={() => onToggle?.(name)}
+          aria-pressed={active === name}
+          type="button"
+        >
           <i style={{ background: categoryColor(name, categories, names) }} />
           {name}
-        </span>
+        </button>
       ))}
     </div>
   );
@@ -545,25 +940,33 @@ function Expenses(props: {
   const [categoryId, setCategoryId] = useState(String(props.categories[0]?.id ?? ""));
   const [subcategoryId, setSubcategoryId] = useState("");
   const [source, setSource] = useState<ExpenseSource>("cash");
+  const [isRecurring, setIsRecurring] = useState(false);
   const [editingExpenseId, setEditingExpenseId] = useState<number | null>(null);
   const [editAmount, setEditAmount] = useState("");
   const [editCategoryId, setEditCategoryId] = useState("");
   const [editSubcategoryId, setEditSubcategoryId] = useState("");
   const [editNotes, setEditNotes] = useState("");
+  const [editIsRecurring, setEditIsRecurring] = useState(false);
   const [openNoteId, setOpenNoteId] = useState<number | null>(null);
   const [expandedMonths, setExpandedMonths] = useState<Record<string, boolean>>({});
+  const [sort, setSort] = useState<ExpenseSort>({ key: "date", direction: "desc" });
   const selectedCategory = props.categories.find((category) => String(category.id) === categoryId);
   const editingCategory = props.categories.find((category) => String(category.id) === editCategoryId);
   const currentMonth = new Date().toISOString().slice(0, 7);
   const groupedExpenses = groupExpensesByMonth(props.expenses);
+  const visibleTotals = totalsByCurrency(props.expenses);
   const periods = Object.keys(groupedExpenses).sort().reverse();
   const isMonthExpanded = (period: string) => props.query.trim() ? true : (expandedMonths[period] ?? period === currentMonth);
+  const updateSort = (key: ExpenseSortKey) => {
+    setSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "amount" || key === "date" ? "desc" : "asc" });
+  };
   const startEditing = (expense: Expense) => {
     setEditingExpenseId(expense.id);
     setEditAmount(String(expense.original_amount));
     setEditCategoryId(expense.category_id ? String(expense.category_id) : "");
     setEditSubcategoryId(expense.subcategory_id ? String(expense.subcategory_id) : "");
     setEditNotes(expense.notes ?? "");
+    setEditIsRecurring(!!expense.is_recurring);
   };
   return (
     <section className="stack">
@@ -588,12 +991,14 @@ function Expenses(props: {
               source,
               currency: "ARS" as Currency,
               original_amount: amount,
-              notes: notes.trim() || null
+              notes: notes.trim() || null,
+              is_recurring: isRecurring
             });
             setDescription("");
             setAmount("0");
             setNotes("");
             setSubcategoryId("");
+            setIsRecurring(false);
           }}
         >
           <h2>Nuevo gasto</h2>
@@ -602,7 +1007,12 @@ function Expenses(props: {
           <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagado por">
             {props.users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
           </select>
-          <select value={categoryId} onChange={(e) => { setCategoryId(e.target.value); setSubcategoryId(""); }} aria-label="Categoria">
+          <select value={categoryId} onChange={(e) => {
+            const nextCategory = props.categories.find((category) => String(category.id) === e.target.value);
+            setCategoryId(e.target.value);
+            setSubcategoryId("");
+            if (nextCategory?.name === "Suscripciones" || nextCategory?.name === "Servicios") setIsRecurring(true);
+          }} aria-label="Categoria">
             {props.categories.map((c) => <option value={c.id} key={c.id}>{c.name}</option>)}
           </select>
           <select value={subcategoryId} onChange={(e) => setSubcategoryId(e.target.value)} aria-label="Subcategoria">
@@ -614,22 +1024,47 @@ function Expenses(props: {
             <option value="transfer">Transferencia</option>
             <option value="other">Otro</option>
           </select>
+          <label className="check-row form-check">
+            <input type="checkbox" checked={isRecurring} onChange={(event) => setIsRecurring(event.target.checked)} />
+            Recurrente
+          </label>
           <textarea value={notes} onChange={(e) => setNotes(e.target.value.slice(0, 500))} aria-label="Nota" placeholder="Nota opcional" maxLength={500} />
           <button className="primary" type="submit"><Plus size={16} /> Agregar</button>
         </form>
         <div className="panel table-panel">
-          <h2>Movimientos</h2>
+          <div className="table-heading">
+            <div>
+              <h2>Movimientos</h2>
+              <div className="import-totals">
+                <span>Total ARS <strong>{money(visibleTotals.ARS ?? 0, "ARS")}</strong></span>
+                <span>Total USD <strong>{money(visibleTotals.USD ?? 0, "USD")}</strong></span>
+              </div>
+            </div>
+          </div>
           <table>
-            <thead><tr><th>Fecha</th><th>Descripcion</th><th>Pago</th><th>Categoria</th><th>Origen</th><th>Importe</th><th>Nota</th><th>Acciones</th></tr></thead>
+            <thead>
+              <tr>
+                <th><button className="sort-header" onClick={() => updateSort("date")}>Fecha{sortIndicator(sort, "date")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("description")}>Descripcion{sortIndicator(sort, "description")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("paid_by")}>Pago{sortIndicator(sort, "paid_by")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("category")}>Categoria{sortIndicator(sort, "category")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("source")}>Origen{sortIndicator(sort, "source")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("recurring")}>Recurrente{sortIndicator(sort, "recurring")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("amount")}>Importe{sortIndicator(sort, "amount")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("notes")}>Nota{sortIndicator(sort, "notes")}</button></th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
             <tbody>
               {periods.map((period) => {
                 const monthExpenses = groupedExpenses[period];
+                const sortedMonthExpenses = sortExpenses(monthExpenses, sort, props.categories, props.users);
                 const expanded = isMonthExpanded(period);
-                const monthTotal = monthExpenses.reduce((sum, expense) => sum + Number(expense.amount_ars), 0);
+                const monthTotals = totalsByCurrency(monthExpenses);
                 return (
                   <Fragment key={period}>
                     <tr className="month-group-row">
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         <button
                           className="month-toggle"
                           onClick={() => setExpandedMonths((current) => ({ ...current, [period]: !expanded }))}
@@ -638,11 +1073,11 @@ function Expenses(props: {
                           {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                           <strong>{monthLabel(period)}</strong>
                           <span>{monthExpenses.length} gastos</span>
-                          <b>{money(monthTotal)}</b>
+                          <b>{formatCurrencyTotals(monthTotals)}</b>
                         </button>
                       </td>
                     </tr>
-                    {expanded && monthExpenses.map((expense) => {
+                    {expanded && sortedMonthExpenses.map((expense) => {
                       const cat = props.categories.find((c) => c.id === expense.category_id);
                       const subcat = cat?.subcategories?.find((subcategory) => subcategory.id === expense.subcategory_id);
                       const isEditing = editingExpenseId === expense.id;
@@ -661,6 +1096,8 @@ function Expenses(props: {
                                     onChange={(event) => {
                                       setEditCategoryId(event.target.value);
                                       setEditSubcategoryId("");
+                                      const nextCategory = props.categories.find((category) => String(category.id) === event.target.value);
+                                      if (nextCategory?.name === "Suscripciones" || nextCategory?.name === "Servicios") setEditIsRecurring(true);
                                     }}
                                     aria-label={`Editar categoria ${expense.description}`}
                                   >
@@ -685,6 +1122,18 @@ function Expenses(props: {
                               )}
                             </td>
                             <td>{sourceLabel(expense.source)}</td>
+                            <td>
+                              {isEditing ? (
+                                <input type="checkbox" checked={editIsRecurring} onChange={(event) => setEditIsRecurring(event.target.checked)} aria-label={`Editar recurrente ${expense.description}`} />
+                              ) : (
+                                <input
+                                  type="checkbox"
+                                  checked={!!expense.is_recurring}
+                                  onChange={(event) => props.onUpdate(expense.id, { is_recurring: event.target.checked })}
+                                  aria-label={`Recurrente ${expense.description}`}
+                                />
+                              )}
+                            </td>
                             <td>
                               {isEditing ? (
                                 <input className="amount-cell-input" value={editAmount} onChange={(event) => setEditAmount(event.target.value)} aria-label={`Editar importe ${expense.description}`} inputMode="decimal" />
@@ -715,7 +1164,8 @@ function Expenses(props: {
                                         category_id: editCategoryId ? Number(editCategoryId) : null,
                                         subcategory_id: editSubcategoryId ? Number(editSubcategoryId) : null,
                                         original_amount: editAmount,
-                                        notes: editNotes.trim() || null
+                                        notes: editNotes.trim() || null,
+                                        is_recurring: editIsRecurring
                                       });
                                       setEditingExpenseId(null);
                                     }}
@@ -749,7 +1199,7 @@ function Expenses(props: {
                           </tr>
                           {openNoteId === expense.id && hasNotes && (
                             <tr className="note-row">
-                              <td colSpan={8}>{expense.notes}</td>
+                              <td colSpan={9}>{expense.notes}</td>
                             </tr>
                           )}
                         </Fragment>
@@ -771,14 +1221,24 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
   const [selected, setSelected] = useState<number[]>([]);
   const [categoryByLine, setCategoryByLine] = useState<Record<number, number | null>>({});
   const [subcategoryByLine, setSubcategoryByLine] = useState<Record<number, number | null>>({});
+  const [recurringByLine, setRecurringByLine] = useState<Record<number, boolean>>({});
+  const [notesByLine, setNotesByLine] = useState<Record<number, string>>({});
+  const [reimbursementByLine, setReimbursementByLine] = useState<Record<number, boolean>>({});
+  const [paidByByHolder, setPaidByByHolder] = useState<Record<string, string>>({});
+  const [copiedHolder, setCopiedHolder] = useState<string | null>(null);
   const [paidByUserId, setPaidByUserId] = useState(String(users[0]?.id ?? 1));
   const queryClient = useQueryClient();
   const pendingImports = useQuery({ queryKey: ["imports", homeId, "parsed"], queryFn: () => api.imports(homeId, "parsed") });
   const loadBatch = (data: ImportBatch) => {
     setBatch(data);
-    setSelected(data.lines.filter((line) => line.duplicate_status !== "already_committed" && !isIgnoredImportKind(line.kind)).map((line) => line.id));
+    setSelected(data.lines.filter((line) => line.status === "pending" && line.duplicate_status !== "already_committed" && !isIgnoredImportLine(line)).map((line) => line.id));
     setCategoryByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_category_id])));
     setSubcategoryByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_subcategory_id])));
+    setRecurringByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_recurring])));
+    setNotesByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.notes ?? ""])));
+    setReimbursementByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.kind === "reimbursement"])));
+    setPaidByByHolder(Object.fromEntries(Array.from(new Set(data.lines.map(cardholderKey))).map((holder) => [holder, userIdForCardholder(holder, users, String(users[0]?.id ?? 1))])));
+    setCopiedHolder(null);
   };
   const uploadCard = useMutation({
     mutationFn: (file: File) => api.uploadCardImport(homeId, file),
@@ -795,7 +1255,17 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
     }
   });
   const commit = useMutation({
-    mutationFn: () => api.commitImport(homeId, batch!.id, selected, Number(paidByUserId), categoryByLine, subcategoryByLine),
+    mutationFn: () => {
+      const rejected = (batch?.lines ?? [])
+        .filter((line) => line.status === "pending" && !selected.includes(line.id) && !isIgnoredImportLine(line))
+        .map((line) => line.id);
+      const paidByOverrides = Object.fromEntries(
+        (batch?.lines ?? [])
+          .filter((line) => selected.includes(line.id))
+          .map((line) => [line.id, Number(paidByByHolder[cardholderKey(line)] ?? paidByUserId)])
+      );
+      return api.commitImport(homeId, batch!.id, selected, Number(paidByUserId), categoryByLine, subcategoryByLine, recurringByLine, notesByLine, reimbursementByLine, paidByOverrides, rejected);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
       queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
@@ -803,6 +1273,11 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
       setSelected([]);
       setCategoryByLine({});
       setSubcategoryByLine({});
+      setRecurringByLine({});
+      setNotesByLine({});
+      setReimbursementByLine({});
+      setPaidByByHolder({});
+      setCopiedHolder(null);
       queryClient.invalidateQueries({ queryKey: ["imports", homeId, "parsed"] });
     }
   });
@@ -814,17 +1289,26 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
         setSelected([]);
         setCategoryByLine({});
         setSubcategoryByLine({});
+        setRecurringByLine({});
+        setNotesByLine({});
+        setReimbursementByLine({});
+        setPaidByByHolder({});
+        setCopiedHolder(null);
       }
       queryClient.invalidateQueries({ queryKey: ["imports", homeId, "parsed"] });
     }
   });
-  const totals = importTotals(batch?.lines ?? [], selected, batch?.source_type);
-  const reviewCount = (batch?.lines ?? []).filter((line) => selected.includes(line.id) && !categoryByLine[line.id] && !isIgnoredImportKind(line.kind)).length;
-  const reviewLines = useMemo(() => orderedImportLines(batch?.lines ?? []), [batch]);
+  const totals = importTotals(batch?.lines ?? [], selected, batch?.source_type, reimbursementByLine);
+  const reviewCount = (batch?.lines ?? []).filter((line) => selected.includes(line.id) && !categoryByLine[line.id] && !isIgnoredImportLine(line)).length;
+  const reviewLines = useMemo(() => orderedImportLines(batch?.lines ?? [], batch?.source_type), [batch]);
   const duplicateCounts = batch?.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.duplicate_status] = (acc[line.duplicate_status] ?? 0) + 1;
     return acc;
   }, {}) ?? {};
+  const visibleDuplicateCounts = {
+    previously_parsed: batch?.source_type === "bbva_account_xls" ? 0 : duplicateCounts.previously_parsed ?? 0,
+    already_committed: duplicateCounts.already_committed ?? 0
+  };
   return (
     <section className="stack">
       <div className="import-choice-grid">
@@ -899,30 +1383,23 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
       {(uploadCard.isPending || uploadAccount.isPending) && <div className="panel">Parseando resumen...</div>}
       {batch && (
         <div className="panel table-panel" data-testid={`active-import-${batch.id}`}>
-          {(duplicateCounts.previously_parsed || duplicateCounts.already_committed) && (
+          {(visibleDuplicateCounts.previously_parsed || visibleDuplicateCounts.already_committed) && (
             <div className="warning">
-              {duplicateCounts.previously_parsed ? `${duplicateCounts.previously_parsed} lineas ya habian sido parseadas pero no convertidas. ` : ""}
-              {duplicateCounts.already_committed ? `${duplicateCounts.already_committed} lineas ya fueron convertidas a gastos y quedan desmarcadas para evitar duplicarlas.` : ""}
+              {visibleDuplicateCounts.previously_parsed ? `${visibleDuplicateCounts.previously_parsed} lineas ya habian sido parseadas pero no convertidas. ` : ""}
+              {visibleDuplicateCounts.already_committed ? `${visibleDuplicateCounts.already_committed} lineas ya fueron convertidas a gastos y quedan desmarcadas para evitar duplicarlas.` : ""}
             </div>
           )}
           <div className="table-heading">
             <div>
               <h2>Lineas detectadas</h2>
-              <div className="import-totals" aria-label="Totales importados">
-                {batch.source_type === "bbva_account_xls" ? (
-                  <>
-                    <span>Ingresos ARS <strong>{money(totals.income.ARS ?? 0, "ARS")}</strong></span>
-                    <span>Egresos ARS <strong>{money(totals.expense.ARS ?? 0, "ARS")}</strong></span>
-                    <span>Ingresos USD <strong>{money(totals.income.USD ?? 0, "USD")}</strong></span>
-                    <span>Egresos USD <strong>{money(totals.expense.USD ?? 0, "USD")}</strong></span>
-                  </>
-                ) : (
+              {batch.source_type !== "bbva_account_xls" && (
+                <div className="import-totals" aria-label="Totales importados">
                   <>
                     <span>Total ARS <strong>{money(Math.abs(totals.total.ARS ?? 0), "ARS")}</strong></span>
                     <span>Total USD <strong>{money(Math.abs(totals.total.USD ?? 0), "USD")}</strong></span>
                   </>
-                )}
-              </div>
+                </div>
+              )}
               <div className={reviewCount ? "review-counter warning-status" : "review-counter"}>
                 <AlertTriangle size={16} />
                 Gastos a revisar: <strong>{reviewCount}</strong>
@@ -938,26 +1415,100 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
             </div>
           </div>
           <table>
-            <thead><tr><th></th><th>Fecha</th><th>Descripcion</th><th>Tipo</th><th>Categoria</th><th>Subcategoria</th><th>Importe</th><th>Estado</th></tr></thead>
+            <thead><tr><th></th><th>Fecha</th><th>Descripcion</th><th>Tipo</th><th>Reintegro</th><th>Categoria</th><th>Subcategoria</th><th>Recurrente</th><th>Nota</th><th>Importe</th><th>Estado</th></tr></thead>
             <tbody>
               {reviewLines.map((line, index) => {
                 const selectedCategory = categories.find((category) => category.id === categoryByLine[line.id]);
-                const isIgnoredCardPayment = isIgnoredImportKind(line.kind);
-                const showCurrencySeparator = index === 0 || reviewLines[index - 1].currency !== line.currency;
+                const isIgnoredCardPayment = isIgnoredImportLine(line);
+                const isLineDisabled = isIgnoredCardPayment || line.status !== "pending";
+                const hidePreviouslyParsed = batch.source_type === "bbva_account_xls" && line.duplicate_status === "previously_parsed";
+                const showDuplicateWarning = line.duplicate_status !== "new" && !hidePreviouslyParsed;
+                const showMonthSeparator = batch.source_type === "bbva_account_xls" && (index === 0 || importLinePeriod(reviewLines[index - 1]) !== importLinePeriod(line));
+                const showHolderSeparator = batch.source_type !== "bbva_account_xls" && (index === 0 || cardholderKey(reviewLines[index - 1]) !== cardholderKey(line));
+                const showCurrencySeparator = batch.source_type !== "bbva_account_xls" && (index === 0 || reviewLines[index - 1].currency !== line.currency || cardholderKey(reviewLines[index - 1]) !== cardholderKey(line));
+                const holderLines = batch.lines.filter((item) => cardholderKey(item) === cardholderKey(line));
+                const holderTotals = importTotals(holderLines, selected, batch.source_type);
+                const holderSelectedCount = holderLines.filter((item) => selected.includes(item.id) && !isIgnoredImportLine(item)).length;
+                const holderKey = cardholderKey(line);
                 return (
                   <Fragment key={line.id}>
-                    {showCurrencySeparator && (
-                      <tr className={`currency-separator ${line.currency.toLowerCase()}`}>
-                        <td colSpan={8}>Consumos en {line.currency}</td>
+                    {showHolderSeparator && (
+                      <tr className="person-separator">
+                        <td colSpan={11}>
+                          <div className="person-separator-content">
+                            <div>
+                              <strong>{cardholderLabel(line)}</strong>
+                              <div className="import-totals month-totals">
+                                <span>Total ARS <strong>{money(Math.abs(holderTotals.total.ARS ?? 0), "ARS")}</strong></span>
+                                <span>Total USD <strong>{money(Math.abs(holderTotals.total.USD ?? 0), "USD")}</strong></span>
+                              </div>
+                            </div>
+                            <div className="row-actions">
+                              <button
+                                className="icon-button"
+                                title="Copiar consumos"
+                                aria-label={`Copiar consumos ${cardholderLabel(line)}`}
+                                disabled={!holderSelectedCount}
+                                onClick={async () => {
+                                  await copyTextToClipboard(importShareText(holderLines, selected, batch.source_type));
+                                  setCopiedHolder(holderKey);
+                                  window.setTimeout(() => setCopiedHolder((current) => current === holderKey ? null : current), 1800);
+                                }}
+                                type="button"
+                              >
+                                <Copy size={16} />
+                              </button>
+                              {copiedHolder === holderKey && <span className="copy-feedback">Copiado</span>}
+                              <select
+                                value={paidByByHolder[holderKey] ?? paidByUserId}
+                                onChange={(event) => setPaidByByHolder((current) => ({ ...current, [holderKey]: event.target.value }))}
+                                aria-label={`Pagador ${cardholderLabel(line)}`}
+                              >
+                                {users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
+                              </select>
+                              <button
+                                className="text-button"
+                                onClick={() => setSelected((current) => Array.from(new Set([...current, ...holderLines.filter((item) => item.status === "pending" && !isIgnoredImportLine(item)).map((item) => item.id)])))}
+                                type="button"
+                              >
+                                Seleccionar persona
+                              </button>
+                              <button
+                                className="text-button"
+                                onClick={() => setSelected((current) => current.filter((id) => !holderLines.some((item) => item.id === id)))}
+                                type="button"
+                              >
+                                Omitir persona
+                              </button>
+                            </div>
+                          </div>
+                        </td>
                       </tr>
                     )}
-                    <tr key={line.id} className={isIgnoredCardPayment ? "ignored-row" : !categoryByLine[line.id] ? "needs-review-row" : undefined}>
+                    {showMonthSeparator && (
+                      <tr className="month-separator">
+                        <td colSpan={11}>
+                          <strong>{monthLabel(importLinePeriod(line))}</strong>
+                          <ImportMonthTotals lines={batch.lines} selected={selected} period={importLinePeriod(line)} reimbursementByLine={reimbursementByLine} />
+                        </td>
+                      </tr>
+                    )}
+                    {showCurrencySeparator && (
+                      <tr className={`currency-separator ${line.currency.toLowerCase()}`}>
+                        <td colSpan={11}>Consumos en {line.currency}</td>
+                      </tr>
+                    )}
+                    <tr
+                      key={line.id}
+                      data-testid={`import-line-${line.id}`}
+                      className={isLineDisabled ? "ignored-row" : !categoryByLine[line.id] ? "needs-review-row" : undefined}
+                    >
                       <td>
                         <input
                           type="checkbox"
                           checked={selected.includes(line.id)}
-                          disabled={isIgnoredCardPayment}
-                          title={isIgnoredCardPayment ? ignoredImportReason(line.kind) : undefined}
+                          disabled={isLineDisabled}
+                          title={isLineDisabled ? ignoredImportReason(line) : undefined}
                           onChange={(event) => {
                             setSelected((current) =>
                               event.target.checked ? [...current, line.id] : current.filter((id) => id !== line.id)
@@ -969,9 +1520,22 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                       <td>{line.description}</td>
                       <td>{kindLabel(line.kind)}</td>
                       <td>
+                        {batch.source_type === "bbva_account_xls" && line.kind === "income" ? (
+                          <input
+                            type="checkbox"
+                            checked={!!reimbursementByLine[line.id]}
+                            disabled={isLineDisabled}
+                            onChange={(event) => setReimbursementByLine((current) => ({ ...current, [line.id]: event.target.checked }))}
+                            aria-label={`Marcar reintegro ${line.description}`}
+                          />
+                        ) : (
+                          <span className="muted">-</span>
+                        )}
+                      </td>
+                      <td>
                         <select
                           value={categoryByLine[line.id] ?? ""}
-                          disabled={isIgnoredCardPayment}
+                          disabled={isLineDisabled}
                           onChange={(event) => {
                             const nextCategoryId = event.target.value ? Number(event.target.value) : null;
                             setCategoryByLine((current) => ({
@@ -982,6 +1546,10 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                               ...current,
                               [line.id]: null
                             }));
+                            const nextCategory = categories.find((category) => category.id === nextCategoryId);
+                            if (nextCategory?.name === "Suscripciones" || nextCategory?.name === "Servicios") {
+                              setRecurringByLine((current) => ({ ...current, [line.id]: true }));
+                            }
                           }}
                           aria-label={`Categoria ${line.description}`}
                         >
@@ -992,7 +1560,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                       <td>
                         <select
                           value={subcategoryByLine[line.id] ?? ""}
-                          disabled={isIgnoredCardPayment || !(selectedCategory?.subcategories?.length)}
+                          disabled={isLineDisabled || !(selectedCategory?.subcategories?.length)}
                           onChange={(event) =>
                             setSubcategoryByLine((current) => ({
                               ...current,
@@ -1005,11 +1573,31 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                           {(selectedCategory?.subcategories ?? []).map((subcategory) => <option value={subcategory.id} key={subcategory.id}>{subcategory.name}</option>)}
                         </select>
                       </td>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={!!recurringByLine[line.id]}
+                          disabled={isLineDisabled}
+                          onChange={(event) => setRecurringByLine((current) => ({ ...current, [line.id]: event.target.checked }))}
+                          aria-label={`Recurrente ${line.description}`}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          className="table-input"
+                          value={notesByLine[line.id] ?? ""}
+                          maxLength={500}
+                          disabled={isLineDisabled}
+                          placeholder="Nota"
+                          onChange={(event) => setNotesByLine((current) => ({ ...current, [line.id]: event.target.value }))}
+                          aria-label={`Nota ${line.description}`}
+                        />
+                      </td>
                       <td>{money(line.original_amount, line.currency)}</td>
                       <td>
-                        <span className={isIgnoredCardPayment || line.duplicate_status !== "new" || !categoryByLine[line.id] ? "status warning-status" : "status"}>
-                          {!isIgnoredCardPayment && !categoryByLine[line.id] ? <AlertTriangle size={14} /> : null}
-                          {!isIgnoredCardPayment && !categoryByLine[line.id] ? "Revisar categoria" : isIgnoredCardPayment ? ignoredImportReason(line.kind) : duplicateLabel(line.duplicate_status)}
+                        <span className={isLineDisabled || showDuplicateWarning || !categoryByLine[line.id] ? "status warning-status" : "status"}>
+                          {!isLineDisabled && !categoryByLine[line.id] ? <AlertTriangle size={14} /> : null}
+                          {!isLineDisabled && !categoryByLine[line.id] ? "Revisar categoria" : isLineDisabled ? ignoredImportReason(line) : hidePreviouslyParsed ? "Lista" : duplicateLabel(line.duplicate_status)}
                         </span>
                       </td>
                     </tr>
@@ -1084,75 +1672,443 @@ function CashWallet({ users, homeId }: { users: User[]; homeId: number }) {
 }
 
 function HistoryPanel({ users, homeId }: { users: User[]; homeId: number }) {
+  const [tab, setTab] = useState<"log" | "imports">("log");
   const history = useQuery({ queryKey: ["history", homeId], queryFn: () => api.history(homeId) });
+  const imports = useQuery({ queryKey: ["imports", homeId, "all"], queryFn: () => api.imports(homeId) });
+  const importSummary = useMemo(() => buildImportCoverage(imports.data ?? [], users), [imports.data, users]);
   return (
     <section className="panel table-panel">
-      <h2>Actividad reciente</h2>
-      <table>
-        <thead><tr><th>Fecha</th><th>Usuario</th><th>Operacion</th><th>Detalle</th><th>Monto</th></tr></thead>
-        <tbody>
-          {(history.data ?? []).map((item) => (
-            <tr key={item.id}>
-              <td>{new Date(item.created_at).toLocaleString("es-AR")}</td>
-              <td>{users.find((user) => user.id === item.actor_user_id)?.display_name ?? "Sistema"}</td>
-              <td>{actionLabel(item.action)}</td>
-              <td>{item.description}</td>
-              <td>{item.amount ? money(item.amount, item.currency ?? "ARS") : "-"}</td>
-            </tr>
+      <div className="tabs">
+        <button className={tab === "log" ? "active" : undefined} onClick={() => setTab("log")}>Log</button>
+        <button className={tab === "imports" ? "active" : undefined} onClick={() => setTab("imports")}>Resumen de importaciones</button>
+      </div>
+      {tab === "log" ? (
+        <>
+          <h2>Actividad reciente</h2>
+          <table>
+            <thead><tr><th>Fecha</th><th>Usuario</th><th>Operacion</th><th>Detalle</th><th>Monto</th></tr></thead>
+            <tbody>
+              {(history.data ?? []).map((item) => (
+                <tr key={item.id}>
+                  <td>{new Date(item.created_at).toLocaleString("es-AR")}</td>
+                  <td>{users.find((user) => user.id === item.actor_user_id)?.display_name ?? "Sistema"}</td>
+                  <td>{actionLabel(item.action)}</td>
+                  <td>{item.description}</td>
+                  <td>{item.amount ? money(item.amount, item.currency ?? "ARS") : "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : (
+        <div className="stack">
+          {importSummary.years.map((year) => (
+            <div className="import-coverage" key={year}>
+              <h2>Cargas {year}</h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Tipo</th>
+                    <th>Subio</th>
+                    <th>Pago</th>
+                    {Array.from({ length: 12 }, (_, index) => <th key={index}>{axisMonthLabel(`${year}-${String(index + 1).padStart(2, "0")}`)}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {importSummary.rows.map((row) => (
+                    <tr key={`${row.source}-${row.uploadedByUserId}-${row.paidByUserId ?? "pending"}`}>
+                      <td>{row.source}</td>
+                      <td>{users.find((user) => user.id === row.uploadedByUserId)?.display_name ?? "Usuario"}</td>
+                      <td>{row.paidByUserId ? users.find((user) => user.id === row.paidByUserId)?.display_name ?? "Usuario" : "Sin procesar"}</td>
+                      {Array.from({ length: 12 }, (_, index) => {
+                        const period = `${year}-${String(index + 1).padStart(2, "0")}`;
+                        const value = row.months[period];
+                        return (
+                          <td key={period}>
+                            {value ? <span className={value === "Procesado" ? "status" : "status warning-status"}>{value}</span> : <span className="muted">-</span>}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ))}
-        </tbody>
-      </table>
+          {!importSummary.years.length && <p className="muted">Todavia no hay importaciones cargadas.</p>}
+        </div>
+      )}
     </section>
   );
 }
 
-function ReceiptsLab({ expenses, homeId }: { expenses: Expense[]; homeId: number }) {
+function ReceiptsLab({ categories, expenses, homeId }: { categories: Category[]; expenses: Expense[]; homeId: number }) {
+  const [receiptTab, setReceiptTab] = useState<"review" | "associate">("review");
   const [expenseId, setExpenseId] = useState("");
+  const [activeReceiptId, setActiveReceiptId] = useState<number | null>(null);
+  const [pendingUpload, setPendingUpload] = useState<{ filename: string; status: "processing" | "cancelled" | "timeout" | "error" } | null>(null);
+  const [editableItems, setEditableItems] = useState<Array<ReceiptItem & { accepted: boolean }>>([]);
+  const [receiptCategoryId, setReceiptCategoryId] = useState<number | null>(null);
+  const [associationExpenseIds, setAssociationExpenseIds] = useState<Record<number, string>>({});
+  const [associationCategoryIds, setAssociationCategoryIds] = useState<Record<number, string>>({});
+  const [reviewSaved, setReviewSaved] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const timeoutRef = useRef<number | null>(null);
+  const cancelledRef = useRef(false);
   const queryClient = useQueryClient();
   const receipts = useQuery({ queryKey: ["receipts", homeId], queryFn: () => api.receipts(homeId) });
-  const uploadReceipt = useMutation({
-    mutationFn: (file: File) => api.uploadReceipt(homeId, file, expenseId ? Number(expenseId) : undefined),
-    onSuccess: () => {
+  const receiptRows = receipts.data ?? [];
+  const reviewReceipts = receiptRows.filter((receipt) => !["reviewed", "associated"].includes(receipt.status));
+  const associationReceipts = receiptRows.filter((receipt) => receipt.status === "reviewed" && !receipt.expense_id);
+  const pendingAssociationCount = associationReceipts.length;
+  const deleteReceipt = useMutation({
+    mutationFn: (receiptId: number) => api.deleteReceipt(homeId, receiptId),
+    onSuccess: (_, receiptId) => {
+      if (activeReceiptId === receiptId) setActiveReceiptId(null);
       queryClient.invalidateQueries({ queryKey: ["receipts", homeId] });
       queryClient.invalidateQueries({ queryKey: ["history", homeId] });
     }
   });
+  const saveReview = useMutation({
+    mutationFn: () => api.updateReceiptItems(homeId, activeReceipt!.id, receiptCategoryId, editableItems.map((item) => ({
+      id: item.id,
+      description: item.description,
+      subcategory_id: item.subcategory_id,
+      suggested_subcategory_name: item.suggested_subcategory_name,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+      total_amount: item.total_amount,
+      accepted: item.accepted
+    }))),
+    onSuccess: (updatedReceipt) => {
+      setReviewSaved(true);
+      setReceiptTab("associate");
+      setActiveReceiptId(null);
+      queryClient.setQueryData<ReceiptImport[]>(["receipts", homeId], (current) =>
+        current?.map((receipt) => receipt.id === updatedReceipt.id ? updatedReceipt : receipt) ?? [updatedReceipt]
+      );
+      queryClient.invalidateQueries({ queryKey: ["receipts", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["categories", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  const associateReceipt = useMutation({
+    mutationFn: ({ receiptId, nextExpenseId, categoryId }: { receiptId: number; nextExpenseId: number; categoryId: number | null }) =>
+      api.associateReceipt(homeId, receiptId, { expense_id: nextExpenseId, category_id: categoryId }),
+    onSuccess: (updatedReceipt) => {
+      queryClient.setQueryData<ReceiptImport[]>(["receipts", homeId], (current) =>
+        current?.map((receipt) => receipt.id === updatedReceipt.id ? updatedReceipt : receipt) ?? [updatedReceipt]
+      );
+      queryClient.invalidateQueries({ queryKey: ["receipts", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  const activeReceipt = reviewReceipts.find((receipt) => receipt.id === activeReceiptId) ?? reviewReceipts[0] ?? null;
+  const isUploading = pendingUpload?.status === "processing";
+  const selectedCategory = categories.find((category) => category.id === receiptCategoryId) ?? null;
+  useEffect(() => {
+    if (!activeReceipt) {
+      setEditableItems([]);
+      setReceiptCategoryId(null);
+      setReviewSaved(false);
+      return;
+    }
+    setEditableItems(activeReceipt.items.map((item) => ({ ...item, accepted: item.status !== "rejected" })));
+    setReceiptCategoryId(activeReceipt.category_id ?? categories.find((category) => category.name === "Compras del hogar")?.id ?? categories[0]?.id ?? null);
+    setReviewSaved(activeReceipt.status === "reviewed");
+  }, [activeReceipt?.id, activeReceipt?.items.length, activeReceipt?.status, activeReceipt?.category_id, categories.length]);
+  const clearUploadTimers = () => {
+    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
+    timeoutRef.current = null;
+  };
+  const cancelUpload = () => {
+    cancelledRef.current = true;
+    abortRef.current?.abort();
+    clearUploadTimers();
+    abortRef.current = null;
+    setPendingUpload((current) => current ? { ...current, status: "cancelled" } : null);
+  };
+  const uploadFiles = async (files: File[]) => {
+    if (!files.length) return;
+    cancelledRef.current = false;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const filename = files.length === 1 ? files[0].name : `${files.length} archivos`;
+    setPendingUpload({ filename, status: "processing" });
+    timeoutRef.current = window.setTimeout(() => {
+      controller.abort();
+      setPendingUpload({ filename, status: "timeout" });
+    }, 120000);
+    try {
+      const receipt = await api.uploadReceipt(homeId, files, expenseId ? Number(expenseId) : undefined, controller.signal);
+      clearUploadTimers();
+      abortRef.current = null;
+      setPendingUpload(null);
+      setActiveReceiptId(receipt.id);
+      queryClient.invalidateQueries({ queryKey: ["receipts", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    } catch {
+      clearUploadTimers();
+      abortRef.current = null;
+      setPendingUpload((current) => current ? { ...current, status: cancelledRef.current ? "cancelled" : current.status === "timeout" ? "timeout" : "error" } : null);
+    }
+  };
+  const updateItem = (id: number, patch: Partial<ReceiptItem & { accepted: boolean }>) => {
+    setReviewSaved(false);
+    setEditableItems((items) => items.map((item) => item.id === id ? { ...item, ...patch } : item));
+  };
+  const acceptedTotal = editableItems.filter((item) => item.accepted).reduce((sum, item) => sum + Number(item.total_amount || 0), 0);
+  const subcategoryOptions = selectedCategory?.subcategories ?? [];
+  const setItemSubcategory = (item: ReceiptItem & { accepted: boolean }, value: string) => {
+    if (!value) {
+      updateItem(item.id, { subcategory_id: null, suggested_subcategory_name: null });
+    } else if (value.startsWith("id:")) {
+      updateItem(item.id, { subcategory_id: Number(value.slice(3)), suggested_subcategory_name: null });
+    } else if (value.startsWith("new:")) {
+      updateItem(item.id, { subcategory_id: null, suggested_subcategory_name: value.slice(4) });
+    }
+  };
+  const subcategoryValue = (item: ReceiptItem) => {
+    if (item.subcategory_id) return `id:${item.subcategory_id}`;
+    if (item.suggested_subcategory_name) return `new:${item.suggested_subcategory_name}`;
+    return "";
+  };
   return (
-    <section className="grid two">
-      <div className="panel form-panel">
-        <h2>Ticket experimental</h2>
-        <p className="muted">La foto queda asociada a un gasto existente y no crea otro consumo. El OCR queda marcado como pendiente para iterarlo con tickets reales.</p>
-        <select value={expenseId} onChange={(event) => setExpenseId(event.target.value)} aria-label="Gasto asociado al ticket">
-          <option value="">Sin asociar todavia</option>
-          {expenses.slice(0, 80).map((expense) => (
-            <option value={expense.id} key={expense.id}>{expense.date} - {expense.description} - {money(expense.original_amount, expense.currency)}</option>
-          ))}
-        </select>
-        <label className="primary file-button">
-          <Upload size={16} /> Subir foto
-          <input
-            type="file"
-            accept="image/*"
-            aria-label="Subir foto de ticket"
-            onChange={(event) => {
-              const file = event.currentTarget.files?.[0];
-              if (file) uploadReceipt.mutate(file);
-              event.currentTarget.value = "";
-            }}
-          />
-        </label>
+    <section className="stack">
+      <div className="tabs receipt-tabs">
+        <button className={receiptTab === "review" ? "active" : ""} onClick={() => setReceiptTab("review")}>Carga y revision</button>
+        <button className={receiptTab === "associate" ? "active" : ""} onClick={() => setReceiptTab("associate")}>
+          Asociacion
+          {pendingAssociationCount > 0 && <span className="badge warning-badge"><AlertTriangle size={14} /> {pendingAssociationCount}</span>}
+        </button>
       </div>
-      <div className="panel">
-        <h2>Tickets cargados</h2>
-        <div className="stack">
-          {(receipts.data ?? []).map((receipt) => (
-            <div className="list-row" key={receipt.id}>
-              <span>{receipt.filename} - {receipt.status}</span>
-              <strong>{receipt.created_at ? new Date(receipt.created_at).toLocaleDateString("es-AR") : ""}</strong>
+      {receiptTab === "review" && (
+      <>
+      <div className="panel receipt-upload-panel">
+        <div>
+          <h2>Ticket experimental</h2>
+          <p className="muted">Subi una foto, video o texto OCR. El ticket se revisa primero y despues se asocia a un gasto existente.</p>
+        </div>
+        <div className="receipt-upload-controls">
+          <select value={expenseId} onChange={(event) => setExpenseId(event.target.value)} aria-label="Gasto asociado al ticket" disabled={isUploading}>
+            <option value="">Sin asociar todavia</option>
+            {expenses.slice(0, 80).map((expense) => (
+              <option value={expense.id} key={expense.id}>{expense.date} - {expense.description} - {money(expense.original_amount, expense.currency)}</option>
+            ))}
+          </select>
+          <label className={isUploading ? "primary file-button disabled" : "primary file-button"}>
+            <Upload size={16} /> Subir ticket
+            <input
+              type="file"
+              accept="image/*,video/*,.txt"
+              aria-label="Subir ticket"
+              disabled={isUploading}
+              multiple
+              onChange={(event) => {
+                const files = Array.from(event.currentTarget.files ?? []);
+                if (files.length) void uploadFiles(files);
+                event.currentTarget.value = "";
+              }}
+            />
+          </label>
+          {isUploading && <button className="icon-button danger" title="Cancelar carga" onClick={cancelUpload}><X size={16} /></button>}
+        </div>
+        <div className="receipt-loads">
+          {pendingUpload && (
+            <div className="receipt-load-row pending">
+              {pendingUpload.status === "processing" ? <i className="spinner" /> : <AlertTriangle size={16} />}
+              <span>{pendingUpload.filename} - {receiptUploadStatusLabel(pendingUpload.status)}</span>
+              {pendingUpload.status === "processing" ? <button className="text-button" onClick={cancelUpload}>Cancelar</button> : <button className="text-button" onClick={() => setPendingUpload(null)}>Ocultar</button>}
+            </div>
+          )}
+          {reviewReceipts.map((receipt) => (
+            <div className={activeReceipt?.id === receipt.id ? "receipt-load-row active" : "receipt-load-row"} key={receipt.id}>
+              <button className="text-button" onClick={() => setActiveReceiptId(receipt.id)}>{receipt.filename}</button>
+              <span>{receiptStatusLabel(receipt.status)} - {receipt.items.length} items</span>
+              <strong>{receipt.parsed_total ? money(receipt.parsed_total) : receipt.created_at ? new Date(receipt.created_at).toLocaleDateString("es-AR") : ""}</strong>
+              <button
+                className="icon-button danger"
+                title="Borrar ticket"
+                aria-label={`Borrar ticket ${receipt.filename}`}
+                disabled={deleteReceipt.isPending}
+                onClick={() => {
+                  if (window.confirm(`Borrar el ticket "${receipt.filename}"?`)) deleteReceipt.mutate(receipt.id);
+                }}
+              >
+                <Trash2 size={16} />
+              </button>
             </div>
           ))}
+          {!reviewReceipts.length && !pendingUpload && <p className="muted">No hay tickets pendientes de revision.</p>}
         </div>
       </div>
+      <div className="panel table-panel receipt-review-panel">
+        <div className="table-heading">
+          <div>
+            <h2>Items del ticket</h2>
+            <p className="muted">{activeReceipt ? `${activeReceipt.filename} - ${editableItems.length} items detectados` : "Selecciona o carga un ticket para revisar sus items."}</p>
+          </div>
+          {activeReceipt && (
+            <div className="toolbar compact">
+              {reviewSaved && <span className="status">Revision guardada</span>}
+              <label className="inline-label">
+                <span>Categoria del ticket</span>
+                <select
+                  value={receiptCategoryId ?? ""}
+                  aria-label="Categoria del ticket"
+                  onChange={(event) => {
+                    setReviewSaved(false);
+                    setReceiptCategoryId(event.target.value ? Number(event.target.value) : null);
+                    setEditableItems((items) => items.map((item) => ({ ...item, subcategory_id: null })));
+                  }}
+                >
+                  <option value="">Sin categoria</option>
+                  {categories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}
+                </select>
+              </label>
+              <span className="status">Total seleccionado {money(acceptedTotal)}</span>
+              <button className="primary" disabled={!editableItems.length || saveReview.isPending} onClick={() => saveReview.mutate()}>
+                <Save size={16} /> Guardar revision
+              </button>
+            </div>
+          )}
+        </div>
+        {isUploading ? (
+          <div className="receipt-processing-large" role="status" aria-label="Procesando ticket">
+            <i className="spinner large" />
+            <strong>Analizando ticket</strong>
+            <span>{pendingUpload?.filename ?? "Ticket"} puede usar IA o OCR local y tardar hasta 2 minutos.</span>
+            <button className="text-button" onClick={cancelUpload}>Cancelar</button>
+          </div>
+        ) : activeReceipt && editableItems.length ? (
+          <table>
+            <thead>
+              <tr><th></th><th>Descripcion</th><th>Subcategoria</th><th>Cantidad</th><th>Precio unitario</th><th>Total</th><th>Estado</th></tr>
+            </thead>
+            <tbody>
+              {editableItems.map((item) => (
+                <tr key={item.id} className={!item.accepted ? "ignored-row" : undefined}>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={item.accepted}
+                      aria-label={`Aceptar item ${item.description}`}
+                      onChange={(event) => updateItem(item.id, { accepted: event.target.checked })}
+                    />
+                  </td>
+                  <td>
+                    <input value={item.description} onChange={(event) => updateItem(item.id, { description: event.target.value })} aria-label={`Descripcion item ${item.id}`} />
+                  </td>
+                  <td>
+                    <select value={subcategoryValue(item)} onChange={(event) => setItemSubcategory(item, event.target.value)} aria-label={`Subcategoria item ${item.id}`}>
+                      <option value="">Sin subcategoria</option>
+                      {subcategoryOptions.map((subcategory) => <option value={`id:${subcategory.id}`} key={subcategory.id}>{subcategory.name}</option>)}
+                      {item.suggested_subcategory_name && !subcategoryOptions.some((subcategory) => subcategory.name === item.suggested_subcategory_name) && (
+                        <option value={`new:${item.suggested_subcategory_name}`}>{item.suggested_subcategory_name} (nueva)</option>
+                      )}
+                    </select>
+                  </td>
+                  <td>
+                    <input value={item.quantity ?? ""} onChange={(event) => updateItem(item.id, { quantity: event.target.value || null })} aria-label={`Cantidad item ${item.id}`} inputMode="decimal" />
+                  </td>
+                  <td>
+                    <input value={item.unit_price ?? ""} onChange={(event) => updateItem(item.id, { unit_price: event.target.value || null })} aria-label={`Precio item ${item.id}`} inputMode="decimal" />
+                  </td>
+                  <td>
+                    <input value={item.total_amount} onChange={(event) => updateItem(item.id, { total_amount: event.target.value })} aria-label={`Total item ${item.id}`} inputMode="decimal" />
+                  </td>
+                  <td><span className={item.accepted ? "status" : "status warning-status"}>{item.accepted ? "Aceptado" : "Ignorado"}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : activeReceipt ? (
+          <div className="warning">Este ticket no tiene items detectados. Podés borrarlo y volver a cargar una foto/video con mejor foco o luz.</div>
+        ) : null}
+      </div>
+      </>
+      )}
+      {receiptTab === "associate" && (
+        <div className="panel table-panel receipt-review-panel">
+          <div className="table-heading">
+            <div>
+              <h2>Asociacion de tickets a gastos</h2>
+              <p className="muted">Los tickets revisados quedan aca hasta asociarlos al gasto de tarjeta, debito o efectivo correspondiente.</p>
+            </div>
+            {pendingAssociationCount > 0 && <span className="status warning-status"><AlertTriangle size={14} /> {pendingAssociationCount} pendientes</span>}
+          </div>
+          {associationReceipts.length ? (
+            <table>
+              <thead>
+                <tr><th>Ticket</th><th>Total</th><th>Categoria</th><th>Gasto asociado</th><th>Acciones</th></tr>
+              </thead>
+              <tbody>
+                {associationReceipts.map((receipt) => {
+                  const selectedExpenseId = associationExpenseIds[receipt.id] ?? "";
+                  const selectedCategoryId = associationCategoryIds[receipt.id] ?? String(receipt.category_id ?? "");
+                  return (
+                    <tr key={receipt.id}>
+                      <td>
+                        <strong>{receipt.filename}</strong>
+                        <div className="muted">{receipt.items.filter((item) => item.status !== "rejected").length} items aceptados</div>
+                      </td>
+                      <td>{receipt.parsed_total ? money(receipt.parsed_total) : "-"}</td>
+                      <td>
+                        <select
+                          value={selectedCategoryId}
+                          aria-label={`Categoria para ticket ${receipt.filename}`}
+                          onChange={(event) => setAssociationCategoryIds((current) => ({ ...current, [receipt.id]: event.target.value }))}
+                        >
+                          <option value="">Sin categoria</option>
+                          {categories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          value={selectedExpenseId}
+                          aria-label={`Gasto para ticket ${receipt.filename}`}
+                          onChange={(event) => setAssociationExpenseIds((current) => ({ ...current, [receipt.id]: event.target.value }))}
+                        >
+                          <option value="">Seleccionar gasto</option>
+                          {expenses.slice(0, 160).map((expense) => (
+                            <option value={expense.id} key={expense.id}>{expense.date} - {expense.description} - {money(expense.original_amount, expense.currency)}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <div className="row-actions">
+                          <button
+                            className="primary"
+                            disabled={!selectedExpenseId || associateReceipt.isPending}
+                            onClick={() => associateReceipt.mutate({ receiptId: receipt.id, nextExpenseId: Number(selectedExpenseId), categoryId: selectedCategoryId ? Number(selectedCategoryId) : null })}
+                          >
+                            Asociar
+                          </button>
+                          <button
+                            className="icon-button danger"
+                            title="Borrar ticket"
+                            aria-label={`Borrar ticket ${receipt.filename}`}
+                            disabled={deleteReceipt.isPending}
+                            onClick={() => {
+                              if (window.confirm(`Borrar el ticket "${receipt.filename}"?`)) deleteReceipt.mutate(receipt.id);
+                            }}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : (
+            <p className="muted">No hay tickets pendientes de asociacion.</p>
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -1163,7 +2119,12 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
   const [editingCategoryId, setEditingCategoryId] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
   const [editColor, setEditColor] = useState("#38bdf8");
+  const [selectedSubcategoryCategoryId, setSelectedSubcategoryCategoryId] = useState<number | null>(categories[0]?.id ?? null);
+  const [subcategoryName, setSubcategoryName] = useState("");
+  const [editingSubcategoryId, setEditingSubcategoryId] = useState<number | null>(null);
+  const [editSubcategoryName, setEditSubcategoryName] = useState("");
   const queryClient = useQueryClient();
+  const selectedSubcategoryCategory = categories.find((category) => category.id === selectedSubcategoryCategoryId) ?? categories[0];
   const createCategory = useMutation({
     mutationFn: () => api.createCategory(homeId, { name, color, icon: "tag" }),
     onSuccess: () => {
@@ -1179,6 +2140,24 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
       queryClient.invalidateQueries({ queryKey: ["categories", homeId] });
       queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
       queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+    }
+  });
+  const createSubcategory = useMutation({
+    mutationFn: () => api.createSubcategory(homeId, { category_id: selectedSubcategoryCategory!.id, name: subcategoryName.trim() }),
+    onSuccess: () => {
+      setSubcategoryName("");
+      queryClient.invalidateQueries({ queryKey: ["categories", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  const updateSubcategory = useMutation({
+    mutationFn: ({ id, nextName }: { id: number; nextName: string }) => api.updateSubcategory(homeId, id, { name: nextName }),
+    onSuccess: () => {
+      setEditingSubcategoryId(null);
+      setEditSubcategoryName("");
+      queryClient.invalidateQueries({ queryKey: ["categories", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
     }
   });
   return (
@@ -1253,12 +2232,74 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
           })}
         </div>
       </div>
+      <div className="panel wide">
+        <h2>Subcategorias</h2>
+        <form
+          className="category-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (selectedSubcategoryCategory && subcategoryName.trim()) createSubcategory.mutate();
+          }}
+        >
+          <select
+            value={selectedSubcategoryCategory?.id ?? ""}
+            aria-label="Categoria para subcategorias"
+            onChange={(event) => setSelectedSubcategoryCategoryId(event.target.value ? Number(event.target.value) : null)}
+          >
+            {categories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}
+          </select>
+          <input value={subcategoryName} onChange={(event) => setSubcategoryName(event.target.value)} placeholder="Nueva subcategoria" aria-label="Nueva subcategoria" />
+          <button className="primary" type="submit" disabled={!selectedSubcategoryCategory || !subcategoryName.trim() || createSubcategory.isPending}>Agregar</button>
+        </form>
+        <div className="stack">
+          {(selectedSubcategoryCategory?.subcategories ?? []).map((subcategory) => {
+            const isEditing = editingSubcategoryId === subcategory.id;
+            return (
+              <div className="list-row category-row" key={subcategory.id}>
+                {isEditing ? (
+                  <>
+                    <input value={editSubcategoryName} onChange={(event) => setEditSubcategoryName(event.target.value)} aria-label={`Nombre subcategoria ${subcategory.name}`} />
+                    <div className="row-actions">
+                      <button
+                        className="icon-button"
+                        title="Guardar subcategoria"
+                        disabled={!editSubcategoryName.trim() || updateSubcategory.isPending}
+                        onClick={() => updateSubcategory.mutate({ id: subcategory.id, nextName: editSubcategoryName.trim() })}
+                      >
+                        <Save size={16} />
+                      </button>
+                      <button className="icon-button" title="Cancelar" onClick={() => setEditingSubcategoryId(null)}>
+                        <X size={16} />
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span>{subcategory.name}</span>
+                    <button
+                      className="icon-button"
+                      title="Editar subcategoria"
+                      onClick={() => {
+                        setEditingSubcategoryId(subcategory.id);
+                        setEditSubcategoryName(subcategory.name);
+                      }}
+                    >
+                      <Settings size={16} />
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })}
+          {selectedSubcategoryCategory && !(selectedSubcategoryCategory.subcategories ?? []).length && <p className="muted">Esta categoria todavia no tiene subcategorias.</p>}
+        </div>
+      </div>
     </section>
   );
 }
 
 function sourceLabel(source: ExpenseSource) {
-  return { manual: "Manual", import_pdf: "PDF", bank_import: "Cuenta", cash: "Efectivo", transfer: "Transferencia", other: "Otro" }[source];
+  return { manual: "Manual", import_pdf: "Credito", bank_import: "Cuenta", cash: "Efectivo", transfer: "Transferencia", other: "Otro" }[source];
 }
 
 function kindLabel(kind: string) {
@@ -1274,6 +2315,7 @@ function kindLabel(kind: string) {
     card_payment: "Pago tarjeta ignorado",
     transfer: "Transferencia",
     income: "Ingreso",
+    reimbursement: "Reintegro",
     previous_payment: "Pago anterior"
   }[kind] ?? kind;
 }
@@ -1286,8 +2328,14 @@ function isIgnoredImportKind(kind: string) {
   return kind === "card_payment" || kind === "previous_payment";
 }
 
-function ignoredImportReason(kind: string) {
-  return kind === "previous_payment" ? "Pago anterior" : "Ignorado";
+function isIgnoredImportLine(line: { kind: string; description: string }) {
+  return isIgnoredImportKind(line.kind) || line.description.toUpperCase().includes("TITULOS");
+}
+
+function ignoredImportReason(line: { kind: string; description: string }) {
+  if (line.kind === "previous_payment") return "Pago anterior";
+  if (line.description.toUpperCase().includes("TITULOS")) return "Operacion MEP ignorada";
+  return "Ignorado";
 }
 
 function actionLabel(action: string) {
@@ -1302,6 +2350,32 @@ function actionLabel(action: string) {
     cash_adjust: "Efectivo ajustado",
     category_create: "Categoria creada",
     category_update: "Categoria editada",
-    receipt_upload: "Ticket cargado"
+    subcategory_create: "Subcategoria creada",
+    subcategory_update: "Subcategoria editada",
+    receipt_upload: "Ticket cargado",
+    receipt_review: "Ticket revisado",
+    receipt_associate: "Ticket asociado",
+    receipt_delete: "Ticket borrado"
   }[action] ?? action;
+}
+
+function receiptStatusLabel(status: ReceiptImport["status"]) {
+  return {
+    parsed: "Parseado",
+    parsed_llm: "Parseado con IA",
+    reviewed: "Revisado",
+    associated: "Asociado",
+    ocr_no_items: "OCR sin items",
+    uploaded_pending_ocr: "Pendiente OCR",
+    uploaded_unsupported: "Formato pendiente"
+  }[status] ?? status;
+}
+
+function receiptUploadStatusLabel(status: "processing" | "cancelled" | "timeout" | "error") {
+  return {
+    processing: "Analizando ticket",
+    cancelled: "Cancelado",
+    timeout: "Tiempo agotado",
+    error: "Error de carga"
+  }[status];
 }

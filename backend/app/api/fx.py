@@ -29,12 +29,21 @@ def list_rates(db: Session = Depends(get_db)) -> list[dict]:
 def upsert_rate(payload: dict, db: Session = Depends(get_db)) -> dict:
     rate_date = date.fromisoformat(payload["date"])
     source = payload.get("source", "blue_average")
-    rate = db.scalar(select(FxRate).where(FxRate.date == rate_date, FxRate.source == source))
+    from_currency = Currency(payload.get("from_currency", "USD"))
+    to_currency = Currency(payload.get("to_currency", "ARS"))
+    rate = db.scalar(
+        select(FxRate).where(
+            FxRate.date == rate_date,
+            FxRate.source == source,
+            FxRate.from_currency == from_currency,
+            FxRate.to_currency == to_currency,
+        )
+    )
     if rate is None:
-        rate = FxRate(date=rate_date, source=source)
+        rate = FxRate(date=rate_date, source=source, from_currency=from_currency, to_currency=to_currency)
         db.add(rate)
-    rate.from_currency = Currency(payload.get("from_currency", "USD"))
-    rate.to_currency = Currency(payload.get("to_currency", "ARS"))
+    rate.from_currency = from_currency
+    rate.to_currency = to_currency
     rate.rate = Decimal(str(payload["rate"]))
     db.commit()
     return {"ok": True}

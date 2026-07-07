@@ -16,6 +16,7 @@ from app.services.audit import log_action
 from app.services.bbva_account_parser import parse_bbva_account_xls
 from app.services.bbva_parser import parse_bbva_visa_pdf
 from app.services.categorizer import suggest_category
+from app.services.merchant_learning import find_learned_suggestion, learn_from_expense
 from app.services.recurring import should_suggest_recurring, sync_recurring_rule
 
 router = APIRouter(prefix="/households/{home_group_id}/imports", tags=["imports"])
@@ -63,21 +64,26 @@ async def upload_bbva_visa(
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
     for line in parsed.lines:
-        suggestion = suggest_category(line.description)
-        suggested_category_id = categories.get(suggestion.name) if suggestion else None
-        suggested_recurring = should_suggest_recurring(db, home_group_id, line.description, suggested_category_id)
+        suggested_category_id, suggested_subcategory_id, suggested_recurring = _suggest_import_line(
+            db,
+            home_group_id,
+            line.description,
+            categories,
+            subcategories,
+        )
         db.add(
             ImportLine(
                 import_batch_id=batch.id,
                 home_group_id=home_group_id,
                 date=line.date,
                 description=line.description,
+                cardholder_name=line.cardholder_name,
                 coupon=line.coupon,
                 kind=line.kind,
                 currency=line.currency,
                 original_amount=line.amount,
                 suggested_category_id=suggested_category_id,
-                suggested_subcategory_id=_suggest_subcategory_id(line.description, suggested_category_id, subcategories),
+                suggested_subcategory_id=suggested_subcategory_id,
                 suggested_recurring=suggested_recurring,
                 fingerprint=f"{batch.id}:{line.fingerprint}",
                 raw_text=line.raw_text,
@@ -118,21 +124,26 @@ async def upload_bbva_account(
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
     for line in parsed.lines:
-        suggestion = suggest_category(line.description)
-        suggested_category_id = categories.get(suggestion.name) if suggestion else None
-        suggested_recurring = should_suggest_recurring(db, home_group_id, line.description, suggested_category_id)
+        suggested_category_id, suggested_subcategory_id, suggested_recurring = _suggest_import_line(
+            db,
+            home_group_id,
+            line.description,
+            categories,
+            subcategories,
+        )
         db.add(
             ImportLine(
                 import_batch_id=batch.id,
                 home_group_id=home_group_id,
                 date=line.date,
                 description=line.description,
+                cardholder_name=None,
                 coupon=None,
                 kind=line.kind,
                 currency=line.currency,
                 original_amount=line.amount,
                 suggested_category_id=suggested_category_id,
-                suggested_subcategory_id=_suggest_subcategory_id(line.description, suggested_category_id, subcategories),
+                suggested_subcategory_id=suggested_subcategory_id,
                 suggested_recurring=suggested_recurring,
                 fingerprint=f"{batch.id}:{line.fingerprint}",
                 raw_text=line.raw_text,
@@ -205,6 +216,7 @@ def commit_import(
             )
         )
     )
+    offset_recurring_line_ids = _reintegrated_recurring_line_ids(db, batch, lines, payload)
     created = 0
     processed = 0
     for line in lines:
@@ -214,9 +226,16 @@ def commit_import(
         _fill_missing_suggestion(db, line)
         category_id = payload.category_overrides.get(line.id, line.suggested_category_id)
         subcategory_id = payload.subcategory_overrides.get(line.id, line.suggested_subcategory_id)
-        is_recurring = payload.recurring_overrides.get(line.id, line.suggested_recurring)
+        paid_by_user_id = payload.paid_by_overrides.get(line.id, payload.paid_by_user_id)
+        is_recurring = payload.recurring_overrides.get(line.id, line.suggested_recurring) and line.id not in offset_recurring_line_ids
+        is_reimbursement = payload.reimbursement_overrides.get(line.id, False) or line.kind == ImportLineKind.reimbursement
+        line.notes = payload.note_overrides.get(line.id, line.notes)
         conversion_date = batch.created_at.date() if batch else line.date
         amount_ars = amount_to_ars(db, Decimal(line.original_amount), line.currency, conversion_date)
+        if batch and batch.source_type == "bbva_account_xls" and _is_bank_financial_movement(line):
+            line.status = "ignored"
+            processed += 1
+            continue
         if line.kind in (ImportLineKind.card_payment, ImportLineKind.previous_payment):
             line.status = "ignored"
             processed += 1
@@ -225,7 +244,7 @@ def commit_import(
             db.add(
                 CashWalletEntry(
                     home_group_id=home_group_id,
-                    user_id=payload.paid_by_user_id,
+                    user_id=paid_by_user_id,
                     date=line.date,
                     description=line.description,
                     currency=line.currency,
@@ -235,13 +254,13 @@ def commit_import(
             line.status = "committed"
             processed += 1
             continue
-        if line.kind == ImportLineKind.income:
+        if line.kind == ImportLineKind.income and not is_reimbursement:
             db.add(
                 Earning(
                     home_group_id=home_group_id,
                     date=line.date,
                     description=line.description,
-                    user_id=payload.paid_by_user_id,
+                    user_id=paid_by_user_id,
                     uploaded_by_user_id=user.id,
                     currency=line.currency,
                     original_amount=abs(Decimal(line.original_amount)),
@@ -255,30 +274,52 @@ def commit_import(
 
         source = ExpenseSource.bank_import if batch and batch.source_type == "bbva_account_xls" else ExpenseSource.import_pdf
         signed_amount = Decimal(line.original_amount)
-        original_amount = signed_amount if signed_amount < 0 or line.kind == ImportLineKind.refund else abs(signed_amount)
-        reporting_amount = amount_ars if signed_amount < 0 or line.kind == ImportLineKind.refund else abs(amount_ars)
+        if is_reimbursement:
+            original_amount = -abs(signed_amount)
+            reporting_amount = -abs(amount_ars)
+            is_recurring = False
+        elif source == ExpenseSource.bank_import:
+            original_amount = abs(signed_amount)
+            reporting_amount = abs(amount_ars)
+        else:
+            original_amount = signed_amount if signed_amount < 0 or line.kind == ImportLineKind.refund else abs(signed_amount)
+            reporting_amount = amount_ars if signed_amount < 0 or line.kind == ImportLineKind.refund else abs(amount_ars)
+            if signed_amount < 0 or line.kind == ImportLineKind.refund:
+                is_recurring = False
         expense = Expense(
             home_group_id=home_group_id,
             date=line.date,
             description=line.description,
             category_id=category_id,
             subcategory_id=subcategory_id,
-            paid_by_user_id=payload.paid_by_user_id,
+            paid_by_user_id=paid_by_user_id,
             uploaded_by_user_id=user.id,
             source=source,
             currency=line.currency,
             original_amount=original_amount,
             amount_ars=reporting_amount,
             import_line_id=line.id,
+            notes=line.notes,
             is_recurring=is_recurring,
         )
         db.add(expense)
         db.flush()
+        if not is_reimbursement:
+            learn_from_expense(db, expense)
         sync_recurring_rule(db, expense)
         line.status = "committed"
         created += 1
         processed += 1
     if batch:
+        if payload.rejected_line_ids:
+            for rejected_line in db.scalars(
+                select(ImportLine).where(
+                    ImportLine.import_batch_id == batch.id,
+                    ImportLine.status == "pending",
+                    ImportLine.id.in_(payload.rejected_line_ids),
+                )
+            ):
+                rejected_line.status = "ignored"
         ignored_kinds = [ImportLineKind.card_payment, ImportLineKind.previous_payment]
         for ignored_line in db.scalars(
             select(ImportLine).where(
@@ -319,11 +360,27 @@ def _read_batch(db: Session, batch_id: int) -> ImportBatchRead:
         id=batch.id,
         filename=batch.filename,
         source_type=batch.source_type,
+        uploaded_by_user_id=batch.uploaded_by_user_id,
         statement_account=batch.statement_account,
         period_label=batch.period_label,
         status=batch.status,
         created_at=batch.created_at.isoformat() if batch.created_at else None,
+        paid_by_user_ids=_paid_by_user_ids_for_lines(db, [line.id for line in lines]),
         lines=lines,
+    )
+
+
+def _paid_by_user_ids_for_lines(db: Session, line_ids: list[int]) -> list[int]:
+    if not line_ids:
+        return []
+    return sorted(
+        set(
+            db.scalars(
+                select(Expense.paid_by_user_id).where(
+                    Expense.import_line_id.in_(line_ids),
+                )
+            )
+        )
     )
 
 
@@ -332,25 +389,84 @@ def _fill_missing_suggestion(db: Session, line: ImportLine) -> None:
         if not line.suggested_recurring:
             line.suggested_recurring = should_suggest_recurring(db, line.home_group_id, line.description, line.suggested_category_id)
         return
-    suggestion = suggest_category(line.description)
-    if suggestion is None:
-        return
-    category_id = db.scalar(
-        select(Category.id).where(
-            Category.home_group_id == line.home_group_id,
-            Category.name == suggestion.name,
-        )
+    categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == line.home_group_id))}
+    category_id, subcategory_id, is_recurring = _suggest_import_line(
+        db,
+        line.home_group_id,
+        line.description,
+        categories,
+        _subcategories_by_name(db, line.home_group_id),
     )
     if category_id is None:
         return
     line.suggested_category_id = category_id
-    line.suggested_subcategory_id = _suggest_subcategory_id(
-        line.description,
-        category_id,
-        _subcategories_by_name(db, line.home_group_id),
-    )
-    line.suggested_recurring = should_suggest_recurring(db, line.home_group_id, line.description, category_id)
+    line.suggested_subcategory_id = subcategory_id
+    line.suggested_recurring = is_recurring
     db.flush()
+
+
+def _suggest_import_line(
+    db: Session,
+    home_group_id: int,
+    description: str,
+    categories: dict[str, int],
+    subcategories: dict[tuple[int, str], int],
+) -> tuple[int | None, int | None, bool]:
+    learned = find_learned_suggestion(db, home_group_id, description)
+    if learned and learned.category_id is not None:
+        return (
+            learned.category_id,
+            learned.subcategory_id,
+            learned.is_recurring or should_suggest_recurring(db, home_group_id, description, learned.category_id),
+        )
+    suggestion = suggest_category(description)
+    suggested_category_id = categories.get(suggestion.name) if suggestion else None
+    return (
+        suggested_category_id,
+        _suggest_subcategory_id(description, suggested_category_id, subcategories),
+        should_suggest_recurring(db, home_group_id, description, suggested_category_id),
+    )
+
+
+def _is_bank_financial_movement(line: ImportLine) -> bool:
+    normalized = line.description.upper()
+    return "TITULOS" in normalized
+
+
+def _reintegrated_recurring_line_ids(
+    db: Session,
+    batch: ImportBatch | None,
+    lines: list[ImportLine],
+    payload: ImportCommitRequest,
+) -> set[int]:
+    if batch is None or batch.source_type == "bbva_account_xls":
+        return set()
+    groups: dict[tuple[str, str, Decimal], list[ImportLine]] = {}
+    for line in lines:
+        category_id = payload.category_overrides.get(line.id, line.suggested_category_id)
+        is_recurring = payload.recurring_overrides.get(line.id, line.suggested_recurring)
+        if not is_recurring or not should_suggest_recurring(db, line.home_group_id, line.description, category_id):
+            continue
+        amount = Decimal(line.original_amount)
+        key = (_recurring_offset_key(line.description), line.currency.value, abs(amount))
+        groups.setdefault(key, []).append(line)
+
+    offset_line_ids: set[int] = set()
+    for grouped_lines in groups.values():
+        has_charge = any(Decimal(line.original_amount) > 0 and line.kind != ImportLineKind.refund for line in grouped_lines)
+        has_reversal = any(Decimal(line.original_amount) < 0 or line.kind == ImportLineKind.refund for line in grouped_lines)
+        if has_charge and has_reversal:
+            offset_line_ids.update(line.id for line in grouped_lines)
+    return offset_line_ids
+
+
+def _recurring_offset_key(description: str) -> str:
+    normalized = description.upper().strip()
+    for prefix in ("DEV ", "CR ", "DB "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+    normalized = normalized.replace(".", " ")
+    return " ".join(normalized.split())[:160]
 
 
 def _subcategories_by_name(db: Session, home_group_id: int) -> dict[tuple[int, str], int]:

@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.domain import Currency, ImportLineKind
-from app.services.bbva_parser import parse_argentine_decimal, parse_bbva_visa_text, parse_spanish_date
+from app.services.bbva_parser import parse_argentine_decimal, parse_bbva_visa_pdf, parse_bbva_visa_text, parse_spanish_date
 
 
 class BbvaParserTests(unittest.TestCase):
@@ -86,6 +86,36 @@ class BbvaParserTests(unittest.TestCase):
         self.assertEqual(amazon.amount, Decimal("14.99"))
         self.assertEqual(steam.currency, Currency.USD)
         self.assertEqual(steam.amount, Decimal("8.99"))
+
+    def test_sanitized_pdf_fixture_is_parseable(self):
+        parsed = parse_bbva_visa_pdf(ROOT / "tests" / "fixtures" / "bbva_visa_sanitized.pdf")
+
+        descriptions = {line.description for line in parsed.lines}
+        self.assertIn("OPENAI *CHATGPT SUBSCR", descriptions)
+        self.assertIn("AMAZON PRIME*DEMO", descriptions)
+
+    def test_cardholder_name_is_preserved_for_additional_card_sections(self):
+        parsed = parse_bbva_visa_text(
+            """
+            cuenta 123
+            CIERRE ACTUAL VENCIMIENTO ACTUAL
+            31-May-26
+            Consumos Micaela Carolina
+            FECHA DESCRIP
+            18-May-26 SPOTIFY USD 4,02 123456 4,02
+            Consumos Mauro
+            FECHA DESCRIP
+            19-May-26 SUPERMERCADO 8.000,00
+            Consumos Micaela Carolina
+            FECHA DESCRIP
+            20-May-26 FARMACIA 2.000,00
+            """
+        )
+
+        by_description = {line.description: line for line in parsed.lines}
+        self.assertEqual(by_description["SPOTIFY"].cardholder_name, "Micaela Carolina")
+        self.assertEqual(by_description["SUPERMERCADO"].cardholder_name, "Mauro")
+        self.assertEqual(by_description["FARMACIA"].cardholder_name, "Micaela Carolina")
 
 
 if __name__ == "__main__":

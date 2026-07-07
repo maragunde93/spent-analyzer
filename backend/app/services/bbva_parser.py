@@ -36,6 +36,7 @@ AMOUNT_RE = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+,\d{2}")
 class ParsedStatementLine:
     date: date
     description: str
+    cardholder_name: str | None
     coupon: str | None
     currency: Currency
     amount: Decimal
@@ -77,7 +78,10 @@ def parse_bbva_visa_text(text: str) -> ParsedStatement:
     statement_date = parse_spanish_date(period_label) if period_label else None
     lines: list[ParsedStatementLine] = []
     section = "ignore"
+    cardholder_name: str | None = None
     pending_line: str | None = None
+    pending_section: str | None = None
+    pending_cardholder_name: str | None = None
 
     for raw in text.splitlines():
         line = " ".join(raw.split())
@@ -86,25 +90,39 @@ def parse_bbva_visa_text(text: str) -> ParsedStatement:
         if line.startswith("Legales y avisos") or "Para más información" in line or "Tarjetas de crédito (fuera" in line:
             section = "ignore"
         if line.startswith("Sus pagos y ajustes realizados"):
+            if pending_line and pending_section:
+                parsed = _parse_transaction_line(pending_line, pending_section, statement_date, pending_cardholder_name)
+                if parsed:
+                    lines.append(parsed)
+                pending_line = None
             section = "adjustments"
+            cardholder_name = None
             continue
         if line.startswith("Consumos "):
+            if pending_line and pending_section:
+                parsed = _parse_transaction_line(pending_line, pending_section, statement_date, pending_cardholder_name)
+                if parsed:
+                    lines.append(parsed)
+                pending_line = None
             section = "consumptions"
+            cardholder_name = _normalize_cardholder_name(line.removeprefix("Consumos "))
             continue
         if section == "ignore" or line.startswith("FECHA DESCRIP"):
             continue
 
         if DATE_RE.match(line):
-            if pending_line:
-                parsed = _parse_transaction_line(pending_line, section, statement_date)
+            if pending_line and pending_section:
+                parsed = _parse_transaction_line(pending_line, pending_section, statement_date, pending_cardholder_name)
                 if parsed:
                     lines.append(parsed)
             pending_line = line
+            pending_section = section
+            pending_cardholder_name = cardholder_name
         elif pending_line and _looks_like_continuation(line):
             pending_line = f"{pending_line} {line}"
 
-    if pending_line:
-        parsed = _parse_transaction_line(pending_line, section, statement_date)
+    if pending_line and pending_section:
+        parsed = _parse_transaction_line(pending_line, pending_section, statement_date, pending_cardholder_name)
         if parsed:
             lines.append(parsed)
 
@@ -133,7 +151,7 @@ def _looks_like_continuation(line: str) -> bool:
     )
 
 
-def _parse_transaction_line(raw: str, section: str, statement_date: date | None = None) -> ParsedStatementLine | None:
+def _parse_transaction_line(raw: str, section: str, statement_date: date | None = None, cardholder_name: str | None = None) -> ParsedStatementLine | None:
     match = DATE_RE.match(raw)
     if not match:
         return None
@@ -152,11 +170,12 @@ def _parse_transaction_line(raw: str, section: str, statement_date: date | None 
     if statement_date and re.search(r"\bC\.\d{2}/\d{2}\b", description, flags=re.IGNORECASE):
         tx_date = statement_date
     kind = _classify_kind(description, amount, section)
-    fingerprint_source = f"{tx_date.isoformat()}|{description}|{coupon or ''}|{currency.value}|{amount}"
+    fingerprint_source = f"{tx_date.isoformat()}|{cardholder_name or ''}|{description}|{coupon or ''}|{currency.value}|{amount}"
     fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
     return ParsedStatementLine(
         date=tx_date,
         description=description,
+        cardholder_name=cardholder_name,
         coupon=coupon,
         currency=currency,
         amount=amount,
@@ -164,6 +183,11 @@ def _parse_transaction_line(raw: str, section: str, statement_date: date | None 
         raw_text=raw,
         fingerprint=fingerprint,
     )
+
+
+def _normalize_cardholder_name(value: str) -> str | None:
+    name = " ".join(value.split()).strip(":- ")
+    return name[:160] if name else None
 
 
 def _strip_summary_totals(body: str) -> str:

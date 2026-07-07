@@ -137,13 +137,15 @@ def _parse_amount(value: object) -> Decimal | None:
 
 def _classify(description: str, amount: Decimal) -> ImportLineKind:
     text = _normalize(description)
+    if "titulos" in text:
+        return ImportLineKind.adjustment
     if "cuenta visa" in text or "cuenta master" in text or "cuenta mastercard" in text:
         return ImportLineKind.card_payment
     if "pago de tarjeta" in text:
         return ImportLineKind.card_payment
     if "pago de servicios tarjeta" in text:
         return ImportLineKind.debit_purchase
-    if any(token in text for token in ("extraccion", "cajero", "atm")):
+    if any(token in text for token in ("extraccion", "cajero", "atm", "operacion en efectivo")):
         return ImportLineKind.cash_withdrawal
     if any(token in text for token in ("sueldo", "salario", "haberes", "acreditacion")):
         return ImportLineKind.income
