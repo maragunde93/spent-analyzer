@@ -1,21 +1,30 @@
 import { categories, demoDashboard, demoExpenses, demoImport } from "./mockData";
 import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, HomeGroup, ImportBatch, ReceiptImport, Subcategory, User } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
-const headers = { "X-Test-User-Email": "mauro@example.test" };
+const API_BASE = import.meta.env.VITE_API_BASE ?? "/finance/api";
+const TEST_USER_EMAIL = import.meta.env.VITE_TEST_USER_EMAIL;
+export const apiFallbacksEnabled = import.meta.env.VITE_ENABLE_API_FALLBACKS === "true" || import.meta.env.DEV;
+const authHeaders: Record<string, string> = TEST_USER_EMAIL ? { "X-Test-User-Email": String(TEST_USER_EMAIL) } : {};
 
 async function request<T>(path: string, init?: RequestInit, fallback?: T): Promise<T> {
   try {
-    const res = await fetch(`${API_BASE}${path}`, { ...init, headers: { ...headers, ...(init?.headers ?? {}) } });
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      credentials: "include",
+      headers: { ...authHeaders, ...(init?.headers ?? {}) }
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as T;
   } catch {
-    if (fallback !== undefined) return fallback;
+    if (apiFallbacksEnabled && fallback !== undefined) return fallback;
     throw new Error("No se pudo conectar con la API");
   }
 }
 
 export const api = {
+  me: () => request<User>("/auth/me"),
+  loginUrl: () => `${API_BASE}/auth/login/google`,
+  logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   households: () => request<HomeGroup[]>("/households", undefined, [{ id: 1, name: "Casa Adrogue" }]),
   members: (homeId: number) => request<User[]>(`/households/${homeId}/members`, undefined, [
     { id: 1, email: "mauro@example.test", display_name: "Mauro", role: "owner" },
@@ -30,6 +39,12 @@ export const api = {
   },
   expenses: (homeId: number) => request<Expense[]>(`/households/${homeId}/expenses`, undefined, demoExpenses),
   categories: (homeId: number) => request<Category[]>(`/households/${homeId}/categories`, undefined, categories),
+  loadDefaultCategories: (homeId: number) =>
+    request<Category[]>(
+      `/households/${homeId}/categories/defaults`,
+      { method: "POST" },
+      categories
+    ),
   createCategory: (homeId: number, category: Pick<Category, "name" | "color" | "icon">) =>
     request<Category>(
       `/households/${homeId}/categories`,
@@ -69,6 +84,11 @@ export const api = {
         body: JSON.stringify(payload)
       },
       categories[0]
+    ),
+  deleteSubcategory: (homeId: number, subcategoryId: number) =>
+    request<{ ok: boolean }>(
+      `/households/${homeId}/subcategories/${subcategoryId}`,
+      { method: "DELETE" }
     ),
   createExpense: (homeId: number, expense: Partial<Expense>) =>
     request<Expense>(

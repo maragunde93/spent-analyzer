@@ -31,6 +31,7 @@ class SubcategoryRead(BaseModel):
     id: int
     category_id: int
     name: str
+    is_system: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

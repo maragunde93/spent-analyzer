@@ -12,6 +12,7 @@ import {
   ClipboardList,
   History as HistoryIcon,
   Home,
+  LogOut,
   MessageSquare,
   PiggyBank,
   Plus,
@@ -27,7 +28,7 @@ import {
   X
 } from "lucide-react";
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { api } from "./api";
+import { api, apiFallbacksEnabled } from "./api";
 import { categories as fallbackCategories, users as fallbackUsers } from "./mockData";
 import type { Category, Currency, Expense, ExpenseSource, ImportBatch, ImportLine, ReceiptImport, ReceiptItem, User } from "./types";
 
@@ -55,7 +56,6 @@ const chartColors = ["#334155", "#475569", "#64748b", "#71717a", "#94a3b8", "#0e
 const noDashboardCategoriesSelected = -1;
 const legendOrder = [
   "Delivery",
-  "Compras del hogar",
   "Servicios",
   "Suscripciones",
   "Salud",
@@ -94,6 +94,18 @@ function orderedKeysByFirstValue(rows: Array<Record<string, string | number>>, c
 function rowTotal(row: Record<string, string | number> | undefined, keys: string[]) {
   if (!row) return 0;
   return keys.reduce((sum, key) => sum + Number(row[key] ?? 0), 0);
+}
+
+function netVisibleConsumptionRows(rows: Array<Record<string, string | number>>, keys: string[]) {
+  return rows.map((row) => {
+    const positiveTotal = keys.reduce((sum, key) => sum + Math.max(0, Number(row[key] ?? 0)), 0);
+    const netTotal = Math.max(0, rowTotal(row, keys));
+    const ratio = positiveTotal > 0 && netTotal < positiveTotal ? netTotal / positiveTotal : 1;
+    return Object.fromEntries([
+      ["period", row.period],
+      ...keys.map((key) => [key, Math.max(0, Number(row[key] ?? 0)) * ratio])
+    ]);
+  }) as Array<Record<string, string | number>>;
 }
 
 function sortKeysByPeriodAmount(rows: Array<Record<string, string | number>>, period: string, keys: string[], descending = true) {
@@ -407,16 +419,18 @@ export function App() {
   const [section, setSection] = useState("dashboard");
   const [query, setQuery] = useState("");
   const [paidBy, setPaidBy] = useState("all");
+  const [expenseCurrency, setExpenseCurrency] = useState<"all" | Currency>("all");
   const [dashboardCategoryIds, setDashboardCategoryIds] = useState<number[]>([]);
   const queryClient = useQueryClient();
-  const households = useQuery({ queryKey: ["households"], queryFn: api.households });
+  const currentUser = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
+  const households = useQuery({ queryKey: ["households"], queryFn: api.households, enabled: !!currentUser.data });
   const homeId = households.data?.[0]?.id ?? 1;
-  const members = useQuery({ queryKey: ["members", homeId], queryFn: () => api.members(homeId) });
-  const dashboard = useQuery({ queryKey: ["dashboard", homeId, paidBy, dashboardCategoryIds.join(",")], queryFn: () => api.dashboard(homeId, paidBy, dashboardCategoryIds) });
-  const expenses = useQuery({ queryKey: ["expenses", homeId], queryFn: () => api.expenses(homeId) });
-  const categoryQuery = useQuery({ queryKey: ["categories", homeId], queryFn: () => api.categories(homeId) });
-  const cats = categoryQuery.data ?? fallbackCategories;
-  const people = members.data?.length ? members.data : fallbackUsers;
+  const members = useQuery({ queryKey: ["members", homeId], queryFn: () => api.members(homeId), enabled: !!currentUser.data });
+  const dashboard = useQuery({ queryKey: ["dashboard", homeId, paidBy, dashboardCategoryIds.join(",")], queryFn: () => api.dashboard(homeId, paidBy, dashboardCategoryIds), enabled: !!currentUser.data });
+  const expenses = useQuery({ queryKey: ["expenses", homeId], queryFn: () => api.expenses(homeId), enabled: !!currentUser.data });
+  const categoryQuery = useQuery({ queryKey: ["categories", homeId], queryFn: () => api.categories(homeId), enabled: !!currentUser.data });
+  const cats = categoryQuery.data ?? (apiFallbacksEnabled ? fallbackCategories : []);
+  const people = members.data?.length ? members.data : apiFallbacksEnabled ? fallbackUsers : [];
   const addExpense = useMutation({
     mutationFn: (expense: Partial<Expense>) => api.createExpense(homeId, expense),
     onSuccess: () => {
@@ -441,6 +455,13 @@ export function App() {
       queryClient.invalidateQueries({ queryKey: ["cash", homeId] });
     }
   });
+  const logout = useMutation({
+    mutationFn: api.logout,
+    onSuccess: () => {
+      queryClient.clear();
+      window.location.assign(import.meta.env.BASE_URL || "/");
+    }
+  });
 
   const filteredExpenses = useMemo(() => {
     return (expenses.data ?? []).filter((expense) => {
@@ -450,9 +471,14 @@ export function App() {
       const haystack = `${expense.description} ${categoryName} ${subcategory?.name ?? ""}`.toLowerCase();
       const matchesText = haystack.includes(query.toLowerCase());
       const matchesUser = paidBy === "all" || String(expense.paid_by_user_id) === paidBy;
-      return matchesText && matchesUser;
+      const matchesCurrency = expenseCurrency === "all" || expense.currency === expenseCurrency;
+      return matchesText && matchesUser && matchesCurrency;
     });
-  }, [expenses.data, cats, query, paidBy]);
+  }, [expenses.data, cats, query, paidBy, expenseCurrency]);
+
+  if (currentUser.isLoading) return <LoadingScreen />;
+  if (currentUser.isError || !currentUser.data) return <LoginScreen />;
+  const authenticatedUser = currentUser.data;
 
   return (
     <div className="app-shell">
@@ -466,8 +492,8 @@ export function App() {
         </div>
         <nav>
           <NavButton active={section === "dashboard"} icon={<CircleDollarSign />} label="Resumen" onClick={() => setSection("dashboard")} />
-          <NavButton active={section === "expenses"} icon={<ReceiptText />} label="Gastos" onClick={() => setSection("expenses")} />
-          <NavButton active={section === "imports"} icon={<Upload />} label="Importaciones" onClick={() => setSection("imports")} />
+          <NavButton active={section === "expenses"} icon={<ReceiptText />} label="Consumos" onClick={() => setSection("expenses")} />
+          <NavButton active={section === "imports"} icon={<Upload />} label="Carga de Resumenes" onClick={() => setSection("imports")} />
           <NavButton active={section === "cash"} icon={<WalletCards />} label="Efectivo" onClick={() => setSection("cash")} />
           <NavButton active={section === "history"} icon={<HistoryIcon />} label="Historial" onClick={() => setSection("history")} />
           <NavButton active={section === "receipts"} icon={<ClipboardList />} label="Tickets" onClick={() => setSection("receipts")} />
@@ -488,7 +514,9 @@ export function App() {
           </div>
           <div className="top-actions">
             {section === "dashboard" && dashboard.data?.fx_rate && <FxRateBadge fxRate={dashboard.data.fx_rate} />}
+            <span className="user-chip">{authenticatedUser.display_name}</span>
             <button className="icon-button" title="Alertas"><Bell size={18} /></button>
+            <button className="icon-button" title="Cerrar sesion" onClick={() => logout.mutate()}><LogOut size={18} /></button>
           </div>
         </header>
         {section === "dashboard" && (
@@ -511,8 +539,10 @@ export function App() {
             onUpdate={(id, payload) => updateExpense.mutate({ id, payload })}
             onDelete={(id) => deleteExpense.mutate(id)}
             paidBy={paidBy}
+            currencyFilter={expenseCurrency}
             query={query}
             setPaidBy={setPaidBy}
+            setCurrencyFilter={setExpenseCurrency}
             setQuery={setQuery}
           />
         )}
@@ -523,6 +553,31 @@ export function App() {
         {section === "settings" && <SettingsPanel categories={cats} users={people} homeId={homeId} />}
       </main>
     </div>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <main className="auth-screen">
+      <section className="auth-panel">
+        <div className="brand-mark"><Home size={20} /></div>
+        <h1>Finance</h1>
+        <p>Cargando sesion...</p>
+      </section>
+    </main>
+  );
+}
+
+function LoginScreen() {
+  return (
+    <main className="auth-screen">
+      <section className="auth-panel">
+        <div className="brand-mark"><Home size={20} /></div>
+        <h1>Finance</h1>
+        <p>Ingresa con una cuenta autorizada para ver los consumos del hogar.</p>
+        <a className="primary-link" href={api.loginUrl()}>Ingresar con Google</a>
+      </section>
+    </main>
   );
 }
 
@@ -538,8 +593,8 @@ function NavButton(props: { active: boolean; icon: ReactNode; label: string; onC
 function titleFor(section: string) {
   return {
     dashboard: "Resumen de consumos",
-    expenses: "Gastos del hogar",
-    imports: "Importar resumen",
+    expenses: "Consumos del hogar",
+    imports: "Carga de Resumenes",
     cash: "Billetera de efectivo",
     history: "Historial",
     receipts: "Tickets de compras",
@@ -590,11 +645,11 @@ function Dashboard({
   const baseMonthlyKeys = Array.from(new Set([...categoryNames(categories), ...chartKeys(rawMonthlyData)]));
   const categoryKeys = categoryNames(categories).filter((name) => baseMonthlyKeys.includes(name));
   const legendKeys = sortLegendNames(categoryKeys);
-  const monthlyData = fillMonthlyRows(rawMonthlyData, periods, baseMonthlyKeys);
-  const monthlyStackData = buildSortedStackRows(rawMonthlyData, periods, baseMonthlyKeys);
+  const monthlyData = netVisibleConsumptionRows(fillMonthlyRows(rawMonthlyData, periods, baseMonthlyKeys), baseMonthlyKeys);
+  const monthlyStackData = buildSortedStackRows(monthlyData, periods, baseMonthlyKeys);
   const rawCumulativeData = toChartRows(data?.cumulative_by_category ?? []);
   const cumulativeKeys = sortKeysByFinalAmount(rawCumulativeData, orderedKeysByFirstValue(rawCumulativeData, categories));
-  const cumulativeData = fillCumulativeRows(rawCumulativeData, periods, cumulativeKeys);
+  const cumulativeData = netVisibleConsumptionRows(fillCumulativeRows(rawCumulativeData, periods, cumulativeKeys), cumulativeKeys);
   const deltaRows = categoryDeltaRows(monthlyData, categoryKeys);
   const currentMonthRow = monthlyData.find((item) => item.period === currentMonth);
   const currentMonthKeys = sortKeysByPeriodAmount(monthlyData, currentMonth, categoryKeys, true);
@@ -802,9 +857,9 @@ function Dashboard({
           </div>
         ) : <p className="muted">Todavia no hay consumos marcados como recurrentes.</p>}
       </div>
-      <div className="panel chart-panel wide">
+      <div className="panel chart-panel wide cumulative-chart">
         <h2>Consumo acumulado {currentYear}</h2>
-        <ResponsiveContainer width="100%" height={280}>
+        <ResponsiveContainer width="100%" height={420}>
           <AreaChart data={cumulativeData}>
             <CartesianGrid stroke="#223047" vertical={false} />
             <XAxis dataKey="period" tickFormatter={(value) => axisMonthLabel(String(value))} tick={{ fill: "#94a3b8", fontSize: 12 }} />
@@ -812,7 +867,9 @@ function Dashboard({
             <Tooltip
               formatter={(value, name) => [money(Number(value)), String(name)]}
               cursor={false}
-              wrapperStyle={{ zIndex: 20, transform: "translateY(-18px)" }}
+              offset={24}
+              allowEscapeViewBox={{ x: true, y: true }}
+              wrapperStyle={{ zIndex: 20 }}
               contentStyle={{ background: "#0f172a", border: "1px solid #263449", color: "#e2e8f0" }}
               itemStyle={{ color: "#e2e8f0" }}
               labelStyle={{ color: "#e2e8f0" }}
@@ -828,7 +885,12 @@ function Dashboard({
                 fill={categoryColor(key, categories, cumulativeKeys)}
                 fillOpacity={activeChartCategory && activeChartCategory !== key ? 0.12 : 0.78}
                 isAnimationActive={false}
-                activeDot={false}
+                activeDot={{
+                  r: 5,
+                  stroke: "#f8fafc",
+                  strokeWidth: 2,
+                  fill: categoryColor(key, categories, cumulativeKeys)
+                }}
               />
             ))}
           </AreaChart>
@@ -927,8 +989,10 @@ function Expenses(props: {
   users: User[];
   query: string;
   paidBy: string;
+  currencyFilter: "all" | Currency;
   setQuery: (value: string) => void;
   setPaidBy: (value: string) => void;
+  setCurrencyFilter: (value: "all" | Currency) => void;
   onAdd: (payload: Partial<Expense>) => void;
   onUpdate: (id: number, payload: Partial<Expense>) => void;
   onDelete: (id: number) => void;
@@ -956,7 +1020,8 @@ function Expenses(props: {
   const groupedExpenses = groupExpensesByMonth(props.expenses);
   const visibleTotals = totalsByCurrency(props.expenses);
   const periods = Object.keys(groupedExpenses).sort().reverse();
-  const isMonthExpanded = (period: string) => props.query.trim() ? true : (expandedMonths[period] ?? period === currentMonth);
+  const hasActiveFilters = !!props.query.trim() || props.paidBy !== "all" || props.currencyFilter !== "all";
+  const isMonthExpanded = (period: string) => hasActiveFilters ? true : (expandedMonths[period] ?? period === currentMonth);
   const updateSort = (key: ExpenseSortKey) => {
     setSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "amount" || key === "date" ? "desc" : "asc" });
   };
@@ -970,67 +1035,84 @@ function Expenses(props: {
   };
   return (
     <section className="stack">
-      <div className="toolbar">
-        <label className="search"><Search size={16} /><input value={props.query} onChange={(e) => props.setQuery(e.target.value)} placeholder="Buscar gasto" /></label>
-        <select value={props.paidBy} onChange={(e) => props.setPaidBy(e.target.value)} aria-label="Filtrar por usuario">
-          <option value="all">Todos</option>
-          {props.users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
-        </select>
-      </div>
       <div className="expense-layout">
-        <form
-          className="panel form-panel"
-          onSubmit={(e) => {
-            e.preventDefault();
-            props.onAdd({
-              date: new Date().toISOString().slice(0, 10),
-              description,
-              paid_by_user_id: Number(paidByUserId),
-              category_id: categoryId ? Number(categoryId) : null,
-              subcategory_id: subcategoryId ? Number(subcategoryId) : null,
-              source,
-              currency: "ARS" as Currency,
-              original_amount: amount,
-              notes: notes.trim() || null,
-              is_recurring: isRecurring
-            });
-            setDescription("");
-            setAmount("0");
-            setNotes("");
-            setSubcategoryId("");
-            setIsRecurring(false);
-          }}
-        >
-          <h2>Nuevo gasto</h2>
-          <input value={description} onChange={(e) => setDescription(e.target.value)} aria-label="Descripcion" placeholder="Descripcion" />
-          <input value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="Importe" inputMode="decimal" />
-          <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagado por">
-            {props.users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
-          </select>
-          <select value={categoryId} onChange={(e) => {
-            const nextCategory = props.categories.find((category) => String(category.id) === e.target.value);
-            setCategoryId(e.target.value);
-            setSubcategoryId("");
-            if (nextCategory?.name === "Suscripciones" || nextCategory?.name === "Servicios") setIsRecurring(true);
-          }} aria-label="Categoria">
-            {props.categories.map((c) => <option value={c.id} key={c.id}>{c.name}</option>)}
-          </select>
-          <select value={subcategoryId} onChange={(e) => setSubcategoryId(e.target.value)} aria-label="Subcategoria">
-            <option value="">Sin subcategoria</option>
-            {(selectedCategory?.subcategories ?? []).map((subcategory) => <option value={subcategory.id} key={subcategory.id}>{subcategory.name}</option>)}
-          </select>
-          <select value={source} onChange={(e) => setSource(e.target.value as ExpenseSource)} aria-label="Origen">
-            <option value="cash">Efectivo</option>
-            <option value="transfer">Transferencia</option>
-            <option value="other">Otro</option>
-          </select>
-          <label className="check-row form-check">
-            <input type="checkbox" checked={isRecurring} onChange={(event) => setIsRecurring(event.target.checked)} />
-            Recurrente
-          </label>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value.slice(0, 500))} aria-label="Nota" placeholder="Nota opcional" maxLength={500} />
-          <button className="primary" type="submit"><Plus size={16} /> Agregar</button>
-        </form>
+        <div className="expense-side">
+          <div className="panel form-panel expense-filter-panel">
+            <h2>Filtros</h2>
+            <label className="search">
+              <Search size={16} />
+              <input value={props.query} onChange={(e) => props.setQuery(e.target.value)} placeholder="Buscar gasto" aria-label="Buscar gasto" />
+            </label>
+            <label>
+              <span>Pagado por</span>
+              <select value={props.paidBy} onChange={(e) => props.setPaidBy(e.target.value)} aria-label="Filtrar por usuario">
+                <option value="all">Hogar</option>
+                {props.users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Moneda</span>
+              <select value={props.currencyFilter} onChange={(e) => props.setCurrencyFilter(e.target.value as "all" | Currency)} aria-label="Filtrar por moneda">
+                <option value="all">Todas</option>
+                <option value="ARS">ARS</option>
+                <option value="USD">USD</option>
+              </select>
+            </label>
+          </div>
+          <form
+            className="panel form-panel"
+            onSubmit={(e) => {
+              e.preventDefault();
+              props.onAdd({
+                date: new Date().toISOString().slice(0, 10),
+                description,
+                paid_by_user_id: Number(paidByUserId),
+                category_id: categoryId ? Number(categoryId) : null,
+                subcategory_id: subcategoryId ? Number(subcategoryId) : null,
+                source,
+                currency: "ARS" as Currency,
+                original_amount: amount,
+                notes: notes.trim() || null,
+                is_recurring: isRecurring
+              });
+              setDescription("");
+              setAmount("0");
+              setNotes("");
+              setSubcategoryId("");
+              setIsRecurring(false);
+            }}
+          >
+            <h2>Nuevo gasto</h2>
+            <input value={description} onChange={(e) => setDescription(e.target.value)} aria-label="Descripcion" placeholder="Descripcion" />
+            <input value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="Importe" inputMode="decimal" />
+            <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagado por">
+              {props.users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
+            </select>
+            <select value={categoryId} onChange={(e) => {
+              const nextCategory = props.categories.find((category) => String(category.id) === e.target.value);
+              setCategoryId(e.target.value);
+              setSubcategoryId("");
+              if (nextCategory?.name === "Suscripciones" || nextCategory?.name === "Servicios") setIsRecurring(true);
+            }} aria-label="Categoria">
+              {props.categories.map((c) => <option value={c.id} key={c.id}>{c.name}</option>)}
+            </select>
+            <select value={subcategoryId} onChange={(e) => setSubcategoryId(e.target.value)} aria-label="Subcategoria">
+              <option value="">Sin subcategoria</option>
+              {(selectedCategory?.subcategories ?? []).map((subcategory) => <option value={subcategory.id} key={subcategory.id}>{subcategory.name}</option>)}
+            </select>
+            <select value={source} onChange={(e) => setSource(e.target.value as ExpenseSource)} aria-label="Origen">
+              <option value="cash">Efectivo</option>
+              <option value="transfer">Transferencia</option>
+              <option value="other">Otro</option>
+            </select>
+            <label className="check-row form-check">
+              <input type="checkbox" checked={isRecurring} onChange={(event) => setIsRecurring(event.target.checked)} />
+              Recurrente
+            </label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value.slice(0, 500))} aria-label="Nota" placeholder="Nota opcional" maxLength={500} />
+            <button className="primary" type="submit"><Plus size={16} /> Agregar</button>
+          </form>
+        </div>
         <div className="panel table-panel">
           <div className="table-heading">
             <div>
@@ -1386,7 +1468,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
           {(visibleDuplicateCounts.previously_parsed || visibleDuplicateCounts.already_committed) && (
             <div className="warning">
               {visibleDuplicateCounts.previously_parsed ? `${visibleDuplicateCounts.previously_parsed} lineas ya habian sido parseadas pero no convertidas. ` : ""}
-              {visibleDuplicateCounts.already_committed ? `${visibleDuplicateCounts.already_committed} lineas ya fueron convertidas a gastos y quedan desmarcadas para evitar duplicarlas.` : ""}
+              {visibleDuplicateCounts.already_committed ? `${visibleDuplicateCounts.already_committed} lineas ya fueron convertidas a consumos y quedan desmarcadas para evitar duplicarlas.` : ""}
             </div>
           )}
           <div className="table-heading">
@@ -1402,7 +1484,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
               )}
               <div className={reviewCount ? "review-counter warning-status" : "review-counter"}>
                 <AlertTriangle size={16} />
-                Gastos a revisar: <strong>{reviewCount}</strong>
+                Consumos a revisar: <strong>{reviewCount}</strong>
               </div>
             </div>
             <div className="toolbar compact">
@@ -1444,8 +1526,16 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                               </div>
                             </div>
                             <div className="row-actions">
+                              <select
+                                className="person-action-control"
+                                value={paidByByHolder[holderKey] ?? paidByUserId}
+                                onChange={(event) => setPaidByByHolder((current) => ({ ...current, [holderKey]: event.target.value }))}
+                                aria-label={`Pagador ${cardholderLabel(line)}`}
+                              >
+                                {users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
+                              </select>
                               <button
-                                className="icon-button"
+                                className="person-action-control"
                                 title="Copiar consumos"
                                 aria-label={`Copiar consumos ${cardholderLabel(line)}`}
                                 disabled={!holderSelectedCount}
@@ -1457,24 +1547,18 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                                 type="button"
                               >
                                 <Copy size={16} />
+                                Copiar
                               </button>
                               {copiedHolder === holderKey && <span className="copy-feedback">Copiado</span>}
-                              <select
-                                value={paidByByHolder[holderKey] ?? paidByUserId}
-                                onChange={(event) => setPaidByByHolder((current) => ({ ...current, [holderKey]: event.target.value }))}
-                                aria-label={`Pagador ${cardholderLabel(line)}`}
-                              >
-                                {users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
-                              </select>
                               <button
-                                className="text-button"
+                                className="person-action-control"
                                 onClick={() => setSelected((current) => Array.from(new Set([...current, ...holderLines.filter((item) => item.status === "pending" && !isIgnoredImportLine(item)).map((item) => item.id)])))}
                                 type="button"
                               >
                                 Seleccionar persona
                               </button>
                               <button
-                                className="text-button"
+                                className="person-action-control danger"
                                 onClick={() => setSelected((current) => current.filter((id) => !holderLines.some((item) => item.id === id)))}
                                 type="button"
                               >
@@ -1816,7 +1900,7 @@ function ReceiptsLab({ categories, expenses, homeId }: { categories: Category[];
       return;
     }
     setEditableItems(activeReceipt.items.map((item) => ({ ...item, accepted: item.status !== "rejected" })));
-    setReceiptCategoryId(activeReceipt.category_id ?? categories.find((category) => category.name === "Compras del hogar")?.id ?? categories[0]?.id ?? null);
+    setReceiptCategoryId(activeReceipt.category_id ?? categories[0]?.id ?? null);
     setReviewSaved(activeReceipt.status === "reviewed");
   }, [activeReceipt?.id, activeReceipt?.items.length, activeReceipt?.status, activeReceipt?.category_id, categories.length]);
   const clearUploadTimers = () => {
@@ -2142,6 +2226,15 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
       queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
     }
   });
+  const loadDefaultCategories = useMutation({
+    mutationFn: () => api.loadDefaultCategories(homeId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["categories", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
   const createSubcategory = useMutation({
     mutationFn: () => api.createSubcategory(homeId, { category_id: selectedSubcategoryCategory!.id, name: subcategoryName.trim() }),
     onSuccess: () => {
@@ -2160,6 +2253,20 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
       queryClient.invalidateQueries({ queryKey: ["history", homeId] });
     }
   });
+  const deleteSubcategory = useMutation({
+    mutationFn: (id: number) => api.deleteSubcategory(homeId, id),
+    onSuccess: (_, deletedId) => {
+      if (editingSubcategoryId === deletedId) {
+        setEditingSubcategoryId(null);
+        setEditSubcategoryName("");
+      }
+      queryClient.invalidateQueries({ queryKey: ["categories", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["receipts", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
   return (
     <section className="grid two">
       <div className="panel">
@@ -2168,6 +2275,14 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
       </div>
       <div className="panel">
         <h2>Categorias</h2>
+        <button
+          className="primary settings-default-button"
+          type="button"
+          disabled={loadDefaultCategories.isPending}
+          onClick={() => loadDefaultCategories.mutate()}
+        >
+          <Copy size={16} /> Cargar configuracion por defecto
+        </button>
         <form
           className="category-form"
           onSubmit={(event) => {
@@ -2276,16 +2391,34 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
                 ) : (
                   <>
                     <span>{subcategory.name}</span>
-                    <button
-                      className="icon-button"
-                      title="Editar subcategoria"
-                      onClick={() => {
-                        setEditingSubcategoryId(subcategory.id);
-                        setEditSubcategoryName(subcategory.name);
-                      }}
-                    >
-                      <Settings size={16} />
-                    </button>
+                    <div className="row-actions">
+                      <button
+                        className="icon-button"
+                        title="Editar subcategoria"
+                        aria-label={`Editar subcategoria ${subcategory.name}`}
+                        onClick={() => {
+                          setEditingSubcategoryId(subcategory.id);
+                          setEditSubcategoryName(subcategory.name);
+                        }}
+                      >
+                        <Settings size={16} />
+                      </button>
+                      {!subcategory.is_system && (
+                        <button
+                          className="icon-button danger"
+                          title="Eliminar subcategoria"
+                          aria-label={`Eliminar subcategoria ${subcategory.name}`}
+                          disabled={deleteSubcategory.isPending}
+                          onClick={() => {
+                            if (window.confirm(`Eliminar la subcategoria "${subcategory.name}"? Los gastos asociados se conservan sin subcategoria.`)) {
+                              deleteSubcategory.mutate(subcategory.id);
+                            }
+                          }}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </div>
                   </>
                 )}
               </div>

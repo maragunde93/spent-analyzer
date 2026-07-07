@@ -13,6 +13,7 @@ export type Subcategory = {
   id: number;
   category_id: number;
   name: string;
+  is_system?: boolean;
 };
 
 export type User = {

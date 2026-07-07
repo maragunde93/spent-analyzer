@@ -1,0 +1,90 @@
+services:
+  spent-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: 512m
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=20
+    environment:
+      POSTGRES_DB: ${SPENT_POSTGRES_DB:-spent_analyzer}
+      POSTGRES_USER: ${SPENT_POSTGRES_USER:-spent}
+      POSTGRES_PASSWORD: ${SPENT_POSTGRES_PASSWORD:?Set SPENT_POSTGRES_PASSWORD in .env}
+    volumes:
+      - spent_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SPENT_POSTGRES_USER:-spent} -d ${SPENT_POSTGRES_DB:-spent_analyzer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  spent-api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      SPENT_ENVIRONMENT: production
+      SPENT_DATABASE_URL: postgresql+psycopg://${SPENT_POSTGRES_USER:-spent}:${SPENT_POSTGRES_PASSWORD:?Set SPENT_POSTGRES_PASSWORD in .env}@spent-postgres:5432/${SPENT_POSTGRES_DB:-spent_analyzer}
+      SPENT_CORS_ORIGINS: ${SPENT_CORS_ORIGINS:-[]}
+      SPENT_TEST_AUTH_ENABLED: "false"
+      SPENT_SEED_DEMO_DATA: "false"
+      SPENT_PUBLIC_BASE_URL: ${SPENT_PUBLIC_BASE_URL:?Set SPENT_PUBLIC_BASE_URL, for example https://homelab.example.com/finance}
+      SPENT_PUBLIC_API_BASE_URL: ${SPENT_PUBLIC_API_BASE_URL:?Set SPENT_PUBLIC_API_BASE_URL, for example https://homelab.example.com/finance/api}
+      SPENT_GOOGLE_CLIENT_ID: ${SPENT_GOOGLE_CLIENT_ID:?Set SPENT_GOOGLE_CLIENT_ID in .env}
+      SPENT_GOOGLE_CLIENT_SECRET: ${SPENT_GOOGLE_CLIENT_SECRET:?Set SPENT_GOOGLE_CLIENT_SECRET in .env}
+      SPENT_ALLOWED_GOOGLE_EMAILS: ${SPENT_ALLOWED_GOOGLE_EMAILS:?Set SPENT_ALLOWED_GOOGLE_EMAILS as a JSON array}
+      SPENT_SESSION_SECRET: ${SPENT_SESSION_SECRET:?Set SPENT_SESSION_SECRET in .env}
+      SPENT_SESSION_COOKIE_PATH: ${SPENT_SESSION_COOKIE_PATH:-/finance}
+      SPENT_SESSION_COOKIE_SECURE: ${SPENT_SESSION_COOKIE_SECURE:-true}
+      SPENT_SESSION_COOKIE_SAMESITE: ${SPENT_SESSION_COOKIE_SAMESITE:-lax}
+      SPENT_GEMINI_API_KEY: ${SPENT_GEMINI_API_KEY:-}
+      SPENT_GEMINI_MODEL: ${SPENT_GEMINI_MODEL:-gemini-3.5-flash}
+      SPENT_FX_AUTO_UPDATE_ENABLED: ${SPENT_FX_AUTO_UPDATE_ENABLED:-true}
+      SPENT_FX_API_URL: ${SPENT_FX_API_URL:-https://dolarapi.com/v1/dolares/blue}
+      SPENT_FX_UPDATE_HOUR_ARGENTINA: ${SPENT_FX_UPDATE_HOUR_ARGENTINA:-11}
+    depends_on:
+      spent-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    networks:
+      - default
+      - homelab_proxy
+
+  spent-web:
+    build:
+      context: ./frontend
+      args:
+        VITE_APP_BASE: /finance/
+        VITE_API_BASE: /finance/api
+        VITE_ENABLE_API_FALLBACKS: "false"
+    restart: unless-stopped
+    mem_limit: 128m
+    depends_on:
+      spent-api:
+        condition: service_healthy
+    networks:
+      - default
+      - homelab_proxy
+
+volumes:
+  spent_postgres_data:
+    name: spent-analyzer_postgres_data
+
+networks:
+  homelab_proxy:
+    name: homelab_proxy
+    external: true

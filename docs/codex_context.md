@@ -402,28 +402,28 @@ Open product question:
 
 ### Categories And Subcategories
 
-Current categories include:
-- Compras del hogar (formerly Supermercado)
-- Delivery
-- Servicios
-- Suscripciones
-- Salud
+Current default categories include:
 - Auto
-- Transporte
-- Ocio / gasto personal
-- Vacaciones
+- Delivery
 - Impuestos
-- Vestimenta
+- Mascotas
+- Ocio / gasto personal
 - Regalos
+- Salud
+- Servicios
 - Sin categoria
+- Suscripciones
+- Transporte
+- Vacaciones
+- Vestimenta
 
 Known defaults:
-- Compras del hogar keeps the old supermercado parsing rules and color.
 - Subcategories exist and can be CRUDed in Casa.
-- Compras del hogar should include at least: `almacen`, `verduleria`, `carniceria`.
 - Edesur should be Servicios / Electricidad.
 - All Servicios should default to recurrente.
 - Suscripciones should default to recurrente.
+- Default categories are not re-applied to an existing configured home on startup. Casa has a manual "Cargar configuracion por defecto" action for loading missing defaults.
+- `Compras del hogar` and `Herramientas` were removed from the default configuration; old system-created copies are purged while preserving associated data.
 
 Category edits should affect historical data because expenses store category IDs, not copied labels/colors.
 

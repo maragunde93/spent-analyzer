@@ -4,19 +4,10 @@ from decimal import Decimal
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
-from app.api.households import DEFAULT_CATEGORIES, DEFAULT_SUBCATEGORIES
+from app.api.households import apply_default_categories, purge_obsolete_default_categories
 from app.config import get_settings
 from app.domain import Currency, ExpenseSource
-from app.models import CashWalletEntry, Category, Expense, FxRate, HomeGroup, ImportLine, Membership, Merchant, ReceiptItem, RecurringRule, Subcategory, User
-
-
-SUBCATEGORY_RENAMES = {
-    "Compras del hogar": {
-        "Almacen": "Almacén",
-        "Verduleria": "Verdulería",
-        "Carniceria": "Carnicería",
-    }
-}
+from app.models import CashWalletEntry, Category, Expense, FxRate, HomeGroup, ImportLine, Membership, Merchant, RecurringRule, Subcategory, User
 
 
 def seed_development_data(db: Session) -> None:
@@ -34,35 +25,14 @@ def seed_development_data(db: Session) -> None:
         if exists is None:
             db.add(Membership(user_id=user.id, home_group_id=group.id, role=role))
 
-    category_by_name: dict[str, Category] = {}
-    for name, color, icon in DEFAULT_CATEGORIES:
-        category = db.scalar(select(Category).where(Category.home_group_id == group.id, Category.name == name))
-        if category is None:
-            if name == "Vacaciones":
-                category = db.scalar(select(Category).where(Category.home_group_id == group.id, Category.name == "Viajes"))
-                if category is not None:
-                    category.name = "Vacaciones"
-            if name == "Ocio / gasto personal":
-                category = db.scalar(select(Category).where(Category.home_group_id == group.id, Category.name == "Entretenimiento"))
-                if category is not None:
-                    category.name = "Ocio / gasto personal"
-            if name == "Compras del hogar":
-                category = db.scalar(select(Category).where(Category.home_group_id == group.id, Category.name == "Supermercado"))
-                if category is not None:
-                    category.name = "Compras del hogar"
-            if category is None:
-                category = Category(home_group_id=group.id, name=name, color=color, icon=icon, is_system=True)
-                db.add(category)
-                db.flush()
-        elif category.is_system:
-            category.color = color
-            category.icon = icon
-        _normalize_subcategories(db, group.id, category, SUBCATEGORY_RENAMES.get(name, {}))
-        for subcategory_name in DEFAULT_SUBCATEGORIES.get(name, []):
-            exists = db.scalar(select(Subcategory.id).where(Subcategory.home_group_id == group.id, Subcategory.category_id == category.id, Subcategory.name == subcategory_name))
-            if exists is None:
-                db.add(Subcategory(home_group_id=group.id, category_id=category.id, name=subcategory_name, is_system=True))
-        category_by_name[name] = category
+    purge_obsolete_default_categories(group.id, db)
+    if db.scalar(select(Category.id).where(Category.home_group_id == group.id)) is None and settings.seed_demo_data:
+        apply_default_categories(group.id, db)
+
+    category_by_name = {
+        category.name: category
+        for category in db.scalars(select(Category).where(Category.home_group_id == group.id))
+    }
 
     _merge_category(db, group.id, "Operacion MEP", "Servicios")
     _merge_category(db, group.id, "Mantenimiento cuenta", "Servicios")
@@ -94,7 +64,7 @@ def seed_development_data(db: Session) -> None:
         db.add(FxRate(date=date(2026, 5, 1), source="blue_average", rate=Decimal("1000.00")))
 
     _expense(db, group.id, mauro.id, mauro.id, date(2026, 5, 30), "PEDIDOSYA*THOUSAND BURG", "Delivery", Decimal("39380.00"), category_by_name)
-    _expense(db, group.id, mauro.id, mauro.id, date(2026, 5, 14), "DISCO SM 037", "Compras del hogar", Decimal("163472.90"), category_by_name)
+    _expense(db, group.id, mauro.id, mauro.id, date(2026, 5, 14), "DISCO SM 037", "Sin categoria", Decimal("163472.90"), category_by_name)
     _expense(
         db,
         group.id,
@@ -109,7 +79,7 @@ def seed_development_data(db: Session) -> None:
         amount_ars=Decimal("20000.00"),
     )
     _expense(db, group.id, mica.id, mica.id, date(2026, 5, 9), "FARMACITY MICA", "Salud", Decimal("18500.00"), category_by_name)
-    _expense(db, group.id, mica.id, mica.id, date(2026, 5, 16), "CARREFOUR EXPRESS", "Compras del hogar", Decimal("62240.50"), category_by_name)
+    _expense(db, group.id, mica.id, mica.id, date(2026, 5, 16), "CARREFOUR EXPRESS", "Sin categoria", Decimal("62240.50"), category_by_name)
     _expense(db, group.id, mica.id, mica.id, date(2026, 5, 22), "CABIFY VIAJE", "Transporte", Decimal("7400.00"), category_by_name)
 
     if db.scalar(select(CashWalletEntry.id).where(CashWalletEntry.home_group_id == group.id)) is None:
@@ -143,33 +113,6 @@ def seed_development_data(db: Session) -> None:
         )
 
     db.commit()
-
-
-def _normalize_subcategories(db: Session, home_group_id: int, category: Category, renames: dict[str, str]) -> None:
-    for old_name, new_name in renames.items():
-        old = db.scalar(
-            select(Subcategory).where(
-                Subcategory.home_group_id == home_group_id,
-                Subcategory.category_id == category.id,
-                Subcategory.name == old_name,
-            )
-        )
-        if old is None:
-            continue
-        existing = db.scalar(
-            select(Subcategory).where(
-                Subcategory.home_group_id == home_group_id,
-                Subcategory.category_id == category.id,
-                Subcategory.name == new_name,
-            )
-        )
-        if existing is None:
-            old.name = new_name
-            continue
-        db.execute(update(Expense).where(Expense.subcategory_id == old.id).values(subcategory_id=existing.id))
-        db.execute(update(ImportLine).where(ImportLine.suggested_subcategory_id == old.id).values(suggested_subcategory_id=existing.id))
-        db.execute(update(ReceiptItem).where(ReceiptItem.subcategory_id == old.id).values(subcategory_id=existing.id))
-        db.delete(old)
 
 
 def _merge_category(db: Session, home_group_id: int, source_name: str, target_name: str) -> None:
@@ -208,6 +151,9 @@ def _expense(
     currency: Currency = Currency.ARS,
     amount_ars: Decimal | None = None,
 ) -> None:
+    category = categories.get(category_name)
+    if category is None:
+        return
     exists = db.scalar(
         select(Expense.id).where(
             Expense.home_group_id == home_group_id,
@@ -223,7 +169,7 @@ def _expense(
             home_group_id=home_group_id,
             date=expense_date,
             description=description,
-            category_id=categories[category_name].id,
+            category_id=category.id,
             paid_by_user_id=paid_by_user_id,
             uploaded_by_user_id=uploaded_by_user_id,
             source=ExpenseSource.import_pdf,

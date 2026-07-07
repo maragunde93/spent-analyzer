@@ -13,8 +13,6 @@ DEFAULT_RULES = {
     "CAJA SEG": "Auto",
     "PEDIDOSYA": "Delivery",
     "DLO*PEDIDOSYA": "Delivery",
-    "DISCO": "Compras del hogar",
-    "CARREFOUR": "Compras del hogar",
     "MOVISTAR": "Servicios",
     "CLARO": "Servicios",
     "EDESUR": "Servicios",

@@ -8,17 +8,6 @@ export const users = [
 export const categories: Category[] = [
   { id: 1, name: "Delivery", color: "#41b6e6", icon: "utensils" },
   {
-    id: 2,
-    name: "Compras del hogar",
-    color: "#2171b5",
-    icon: "shopping-cart",
-    subcategories: [
-      { id: 10, category_id: 2, name: "Almacén" },
-      { id: 11, category_id: 2, name: "Verdulería" },
-      { id: 12, category_id: 2, name: "Carnicería" }
-    ]
-  },
-  {
     id: 3,
     name: "Servicios",
     color: "#ff9800",
@@ -32,6 +21,7 @@ export const categories: Category[] = [
     ]
   },
   { id: 4, name: "Suscripciones", color: "#ffc107", icon: "repeat" },
+  { id: 6, name: "Sin categoria", color: "#f44336", icon: "tag" },
   { id: 5, name: "Vacaciones", color: "#4caf50", icon: "plane" },
   { id: 7, name: "Transporte", color: "#9c27b0", icon: "car" },
   { id: 8, name: "Vestimenta", color: "#e91e63", icon: "shirt" },
@@ -55,7 +45,7 @@ export const demoExpenses: Expense[] = [
     id: 2,
     date: "2026-05-14",
     description: "DISCO SM 037",
-    category_id: 2,
+    category_id: 6,
     paid_by_user_id: 1,
     uploaded_by_user_id: 1,
     source: "import_pdf",
@@ -80,7 +70,7 @@ export const demoExpenses: Expense[] = [
     id: 4,
     date: "2026-05-16",
     description: "CARREFOUR EXPRESS",
-    category_id: 2,
+    category_id: 6,
     paid_by_user_id: 2,
     uploaded_by_user_id: 2,
     source: "manual",
@@ -105,7 +95,7 @@ export const demoExpenses: Expense[] = [
 export const demoDashboard: DashboardSummary = {
   total_ars: "222852.90",
   by_category: [
-    { name: "Compras del hogar", amount_ars: "163472.90" },
+    { name: "Sin categoria", amount_ars: "163472.90" },
     { name: "Delivery", amount_ars: "39380.00" },
     { name: "Suscripciones", amount_ars: "20000.00" }
   ],
@@ -116,14 +106,14 @@ export const demoDashboard: DashboardSummary = {
     { period: "2026-05", amount_ars: "222852.90" }
   ],
   monthly_by_category: [
-    { period: "2026-03", Delivery: "45000.00", "Compras del hogar": "84000.00" },
-    { period: "2026-04", Delivery: "60000.00", "Compras del hogar": "170000.00", Servicios: "85000.00" },
-    { period: "2026-05", Delivery: "39380.00", "Compras del hogar": "163472.90", Suscripciones: "20000.00" }
+    { period: "2026-03", Delivery: "45000.00", "Sin categoria": "84000.00" },
+    { period: "2026-04", Delivery: "60000.00", "Sin categoria": "170000.00", Servicios: "85000.00" },
+    { period: "2026-05", Delivery: "39380.00", "Sin categoria": "163472.90", Suscripciones: "20000.00" }
   ],
   cumulative_by_category: [
-    { period: "2026-03", Delivery: "45000.00", "Compras del hogar": "84000.00" },
-    { period: "2026-04", Delivery: "105000.00", "Compras del hogar": "254000.00", Servicios: "85000.00" },
-    { period: "2026-05", Delivery: "144380.00", "Compras del hogar": "417472.90", Servicios: "85000.00", Suscripciones: "20000.00" }
+    { period: "2026-03", Delivery: "45000.00", "Sin categoria": "84000.00" },
+    { period: "2026-04", Delivery: "105000.00", "Sin categoria": "254000.00", Servicios: "85000.00" },
+    { period: "2026-05", Delivery: "144380.00", "Sin categoria": "417472.90", Servicios: "85000.00", Suscripciones: "20000.00" }
   ],
   fx_rate: {
     from_currency: "USD",
