@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api import auth, cash, dashboard, expenses, fx, history, households, imports, receipts
-from app.config import get_settings, validate_production_settings
+from app.config import get_settings, should_seed_development_data, validate_production_settings
 from app.database import Base, SessionLocal, engine, init_db
 from app.dev_seed import seed_development_data
 from app.services.fx_updater import run_daily_blue_rate_update
@@ -44,8 +44,9 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup() -> None:
         init_db()
-        with SessionLocal() as db:
-            seed_development_data(db)
+        if should_seed_development_data(settings):
+            with SessionLocal() as db:
+                seed_development_data(db)
         if settings.fx_auto_update_enabled:
             app.state.fx_update_task = asyncio.create_task(
                 run_daily_blue_rate_update(

@@ -163,6 +163,16 @@ export const api = {
   },
   importBatch: (homeId: number, batchId: number) =>
     request<ImportBatch>(`/households/${homeId}/imports/${batchId}`, undefined, demoImport),
+  updateImportBatch: (homeId: number, batchId: number, payload: { statement_period: string | null }) =>
+    request<ImportBatch>(
+      `/households/${homeId}/imports/${batchId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      },
+      { ...demoImport, ...payload }
+    ),
   deleteImport: (homeId: number, batchId: number) =>
     request<{ ok: boolean }>(
       `/households/${homeId}/imports/${batchId}`,

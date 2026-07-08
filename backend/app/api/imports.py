@@ -11,7 +11,7 @@ from app.auth import get_current_user, require_home_member
 from app.database import get_db
 from app.domain import Currency, ExpenseSource, ImportLineKind
 from app.models import CashWalletEntry, Category, Earning, Expense, FxRate, ImportBatch, ImportLine, Subcategory, User
-from app.schemas import ImportBatchRead, ImportCommitRequest
+from app.schemas import ImportBatchRead, ImportBatchUpdate, ImportCommitRequest
 from app.services.accounting import amount_to_ars
 from app.services.audit import log_action
 from app.services.bbva_account_parser import parse_bbva_account_xls
@@ -19,6 +19,7 @@ from app.services.bbva_parser import parse_bbva_visa_pdf
 from app.services.categorizer import suggest_category
 from app.services.merchant_learning import find_learned_suggestion, learn_from_expense
 from app.services.recurring import should_suggest_recurring, sync_recurring_rule
+from app.services.statement_period import infer_card_statement_period, valid_statement_period
 
 router = APIRouter(prefix="/households/{home_group_id}/imports", tags=["imports"])
 
@@ -59,6 +60,7 @@ async def upload_bbva_visa(
         filename=file.filename or "statement.pdf",
         statement_account=parsed.account,
         period_label=parsed.period_label,
+        statement_period=infer_card_statement_period(parsed.period_label),
     )
     db.add(batch)
     db.flush()
@@ -166,6 +168,27 @@ def get_import_batch(
 ) -> ImportBatchRead:
     require_home_member(home_group_id, user, db)
     return _read_batch(db, batch_id)
+
+
+@router.patch("/{batch_id}", response_model=ImportBatchRead)
+def update_import_batch(
+    home_group_id: int,
+    batch_id: int,
+    payload: ImportBatchUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ImportBatchRead:
+    require_home_member(home_group_id, user, db)
+    batch = db.get(ImportBatch, batch_id)
+    if batch is None or batch.home_group_id != home_group_id:
+        raise HTTPException(status_code=404, detail="Importacion no encontrada")
+    if batch.source_type == "bbva_account_xls":
+        raise HTTPException(status_code=400, detail="El mes del resumen solo aplica a tarjetas")
+    if not valid_statement_period(payload.statement_period):
+        raise HTTPException(status_code=400, detail="Mes de resumen invalido")
+    batch.statement_period = payload.statement_period
+    db.commit()
+    return _read_batch(db, batch.id)
 
 
 @router.delete("/{batch_id}")
@@ -368,6 +391,7 @@ def _read_batch(db: Session, batch_id: int) -> ImportBatchRead:
         uploaded_by_user_id=batch.uploaded_by_user_id,
         statement_account=batch.statement_account,
         period_label=batch.period_label,
+        statement_period=batch.statement_period or infer_card_statement_period(batch.period_label),
         fx_rate_ars_per_usd=batch.fx_rate_ars_per_usd,
         status=batch.status,
         created_at=batch.created_at.isoformat() if batch.created_at else None,

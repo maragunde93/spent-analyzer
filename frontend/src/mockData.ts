@@ -115,6 +115,7 @@ export const demoDashboard: DashboardSummary = {
     { period: "2026-04", Delivery: "105000.00", "Sin categoria": "254000.00", Servicios: "85000.00" },
     { period: "2026-05", Delivery: "144380.00", "Sin categoria": "417472.90", Servicios: "85000.00", Suscripciones: "20000.00" }
   ],
+  card_statement_periods: ["2026-03", "2026-04", "2026-05"],
   fx_rate: {
     from_currency: "USD",
     to_currency: "ARS",
@@ -136,6 +137,7 @@ export const demoImport: ImportBatch = {
   uploaded_by_user_id: 1,
   statement_account: "0000000000",
   period_label: "28-May-26",
+  statement_period: "2026-05",
   fx_rate_ars_per_usd: "1500.0000",
   status: "parsed",
   created_at: "2026-07-03T12:00:00",

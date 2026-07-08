@@ -52,6 +52,7 @@ export type DashboardSummary = {
   trend: Array<{ period: string; amount_ars: string }>;
   monthly_by_category: Array<Record<string, string>>;
   cumulative_by_category: Array<Record<string, string>>;
+  card_statement_periods?: string[];
   fx_rate?: {
     from_currency: Currency;
     to_currency: Currency;
@@ -113,6 +114,7 @@ export type ImportBatch = {
   uploaded_by_user_id: number;
   statement_account: string | null;
   period_label: string | null;
+  statement_period: string | null;
   fx_rate_ars_per_usd: string | null;
   status: string;
   created_at: string | null;

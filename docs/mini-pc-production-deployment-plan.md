@@ -98,7 +98,7 @@ SPENT_POSTGRES_PASSWORD=replace-with-strong-password
 SPENT_CORS_ORIGINS=["https://homelab.local"]
 SPENT_PUBLIC_BASE_URL=https://homelab.local/finance
 SPENT_PUBLIC_API_BASE_URL=https://homelab.local/finance/api
-SPENT_LOCAL_USERS='[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$260000$..."}]'
+SPENT_LOCAL_USERS='[{"username":"mauro","email":"mauro@homelab.local","display_name":"Mauro","password_hash":"pbkdf2_sha256$260000$..."}]'
 SPENT_SESSION_SECRET=replace-with-long-random-secret
 SPENT_SESSION_COOKIE_PATH=/finance
 SPENT_SESSION_COOKIE_SECURE=true
@@ -198,7 +198,7 @@ The three-year relational dataset should stay well below 250 MB unless receipt i
 - `SPENT_ENVIRONMENT=production`.
 - `SPENT_TEST_AUTH_ENABLED=false`.
 - Strong `SPENT_SESSION_SECRET`.
-- `SPENT_LOCAL_USERS` contains only approved local accounts and PBKDF2 password hashes.
+- `SPENT_LOCAL_USERS` contains only approved local accounts and PBKDF2 password hashes, using production emails rather than `example.test` fixture addresses.
 - Local CA certificate is installed on trusted client devices.
 - nginx certificate files exist before starting `homelab_proxy`.
 - `.env` stays uncommitted.

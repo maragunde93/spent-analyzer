@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.api.auth import LoginRequest, authenticate_google_user, login_local, logout
-from app.config import get_settings, validate_production_settings
+from app.config import get_settings, should_seed_development_data, validate_production_settings
 from app.database import Base
 from app.local_auth import hash_password
 from app.models import HomeGroup, Membership, User
@@ -123,6 +123,18 @@ class GoogleAuthTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             validate_production_settings(settings)
+
+    def test_production_does_not_run_development_seed(self):
+        settings = get_settings()
+        settings.environment = "production"
+
+        self.assertFalse(should_seed_development_data(settings))
+
+    def test_development_runs_development_seed(self):
+        settings = get_settings()
+        settings.environment = "development"
+
+        self.assertTrue(should_seed_development_data(settings))
 
 
 if __name__ == "__main__":

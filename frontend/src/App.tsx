@@ -109,14 +109,6 @@ function netVisibleConsumptionRows(rows: Array<Record<string, string | number>>,
   }) as Array<Record<string, string | number>>;
 }
 
-function sortKeysByPeriodAmount(rows: Array<Record<string, string | number>>, period: string, keys: string[], descending = true) {
-  const row = rows.find((item) => item.period === period);
-  return [...keys].sort((a, b) => {
-    const diff = Number(row?.[b] ?? 0) - Number(row?.[a] ?? 0);
-    return descending ? diff : -diff;
-  });
-}
-
 function sortKeysByFinalAmount(rows: Array<Record<string, string | number>>, keys: string[]) {
   const row = [...rows].reverse().find((item) => rowTotal(item, keys) !== 0);
   return [...keys].sort((a, b) => Number(row?.[b] ?? 0) - Number(row?.[a] ?? 0));
@@ -133,6 +125,16 @@ function sortLegendNames(names: string[]) {
 
 function monthPeriods(year: number) {
   return Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}`);
+}
+
+function shiftMonthPeriod(period: string, offset: number) {
+  const [year, month] = period.split("-").map(Number);
+  const date = new Date(year, month - 1 + offset, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthWindowEnding(period: string, size: number) {
+  return Array.from({ length: size }, (_, index) => shiftMonthPeriod(period, index - size + 1));
 }
 
 function fillMonthlyRows(rows: Array<Record<string, string | number>>, periods: string[], keys: string[]) {
@@ -215,8 +217,15 @@ function formatCurrencyTotals(totals: Partial<Record<Currency, number>>) {
 
 type ExpenseSortKey = "date" | "description" | "paid_by" | "category" | "source" | "recurring" | "amount" | "notes";
 type ExpenseSort = { key: ExpenseSortKey; direction: "asc" | "desc" };
+type AverageSortKey = "category" | "lastMonth" | "average3" | "average6" | "annualAverage";
+type AverageSort = { key: AverageSortKey; direction: "asc" | "desc" };
 
 function sortIndicator(sort: ExpenseSort, key: ExpenseSortKey) {
+  if (sort.key !== key) return "";
+  return sort.direction === "asc" ? " ↑" : " ↓";
+}
+
+function averageSortIndicator(sort: AverageSort, key: AverageSortKey) {
   if (sort.key !== key) return "";
   return sort.direction === "asc" ? " ↑" : " ↓";
 }
@@ -251,18 +260,65 @@ function sortExpenses(expenses: Expense[], sort: ExpenseSort, categories: Catego
   });
 }
 
-function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: string[]) {
-  return rows.map((row, index) => {
-    const previous = rows[index - 1];
+function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: string[], loadedPeriods: string[]) {
+  const rowsByPeriod = new Map(rows.map((row) => [String(row.period), row]));
+  return loadedPeriods.slice(1).map((period, periodIndex) => {
+    const index = periodIndex + 1;
+    const previousPeriods = loadedPeriods.slice(Math.max(0, index - 3), index);
+    const row = rowsByPeriod.get(period) ?? { period };
     return {
       period: String(row.period),
       values: keys.map((key) => {
         const current = Number(row[key] ?? 0);
-        const prior = previous ? Number(previous[key] ?? 0) : 0;
+        const prior = previousPeriods.length
+          ? previousPeriods.reduce((sum, priorPeriod) => sum + Number(rowsByPeriod.get(priorPeriod)?.[key] ?? 0), 0) / previousPeriods.length
+          : 0;
         const percent = prior === 0 ? (current === 0 ? 0 : null) : ((current - prior) / Math.abs(prior)) * 100;
         return { key, current, prior, percent };
       })
     };
+  });
+}
+
+function averageForPeriods(rowsByPeriod: Map<string, Record<string, string | number>>, key: string, periods: string[], loadedPeriods: Set<string>) {
+  const values = periods
+    .filter((period) => loadedPeriods.has(period))
+    .map((period) => Number(rowsByPeriod.get(period)?.[key] ?? 0));
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function categoryAverageRows(
+  rows: Array<Record<string, string | number>>,
+  keys: string[],
+  latestStatementPeriod: string | null,
+  loadedStatementPeriods: string[],
+  annualReferenceYear: number
+) {
+  if (!latestStatementPeriod) return [];
+  const rowsByPeriod = new Map(rows.map((row) => [String(row.period), row]));
+  const loadedPeriods = new Set(loadedStatementPeriods);
+  const previousYearPeriods = monthPeriods(annualReferenceYear);
+  return keys
+    .map((key) => ({
+      key,
+      lastMonth: Number(rowsByPeriod.get(latestStatementPeriod)?.[key] ?? 0),
+      average3: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 3), loadedPeriods),
+      average6: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 6), loadedPeriods),
+      annualAverage: averageForPeriods(rowsByPeriod, key, previousYearPeriods, loadedPeriods)
+    }));
+}
+
+type CategoryAverageRow = ReturnType<typeof categoryAverageRows>[number];
+
+function sortCategoryAverageRows(rows: CategoryAverageRow[], sort: AverageSort) {
+  return [...rows].sort((a, b) => {
+    const left = sort.key === "category" ? a.key : a[sort.key];
+    const right = sort.key === "category" ? b.key : b[sort.key];
+    const comparison = typeof left === "number" && typeof right === "number"
+      ? left - right
+      : String(left).localeCompare(String(right), "es-AR", { sensitivity: "base" });
+    if (comparison !== 0) return sort.direction === "asc" ? comparison : -comparison;
+    return a.key.localeCompare(b.key, "es-AR", { sensitivity: "base" });
   });
 }
 
@@ -284,7 +340,11 @@ function buildImportCoverage(imports: ImportBatch[], users: User[]) {
       continue;
     }
     const source = importSourceLabel(batch);
-    const periods = new Set(batch.lines.length ? batch.lines.map((line) => line.date.slice(0, 7)) : batch.created_at ? [batch.created_at.slice(0, 7)] : []);
+    const periods = new Set(
+      batch.source_type === "bbva_account_xls"
+        ? batch.lines.length ? batch.lines.map((line) => line.date.slice(0, 7)) : batch.created_at ? [batch.created_at.slice(0, 7)] : []
+        : batch.statement_period ? [batch.statement_period] : batch.created_at ? [batch.created_at.slice(0, 7)] : []
+    );
     const isProcessed = batch.status === "committed" || batch.lines.some((line) => line.status === "committed" || line.status === "ignored");
     const paidByIds = batch.paid_by_user_ids.length ? batch.paid_by_user_ids : [null];
     for (const paidByUserId of paidByIds) {
@@ -620,9 +680,9 @@ function LoginScreen() {
 
 function NavButton(props: { active: boolean; icon: ReactNode; label: string; onClick: () => void }) {
   return (
-    <button className={props.active ? "nav active" : "nav"} onClick={props.onClick}>
+    <button className={props.active ? "nav active" : "nav"} type="button" title={props.label} aria-label={props.label} onClick={props.onClick}>
       {props.icon}
-      {props.label}
+      <span>{props.label}</span>
     </button>
   );
 }
@@ -735,8 +795,8 @@ function Dashboard({
   const [activeMonthlyCategory, setActiveMonthlyCategory] = useState<string | null>(null);
   const [activeLegendCategory, setActiveLegendCategory] = useState<string | null>(null);
   const [expandedRecurring, setExpandedRecurring] = useState<Record<string, boolean>>({});
+  const [averageSort, setAverageSort] = useState<AverageSort>({ key: "average6", direction: "desc" });
   const currentYear = new Date().getFullYear();
-  const currentMonth = new Date().toISOString().slice(0, 7);
   const periods = monthPeriods(currentYear);
   const rawMonthlyData = toChartRows(data?.monthly_by_category ?? []);
   const baseMonthlyKeys = Array.from(new Set([...categoryNames(categories), ...chartKeys(rawMonthlyData)]));
@@ -747,48 +807,26 @@ function Dashboard({
   const rawCumulativeData = toChartRows(data?.cumulative_by_category ?? []);
   const cumulativeKeys = sortKeysByFinalAmount(rawCumulativeData, orderedKeysByFirstValue(rawCumulativeData, categories));
   const cumulativeData = netVisibleConsumptionRows(fillCumulativeRows(rawCumulativeData, periods, cumulativeKeys), cumulativeKeys);
-  const deltaRows = categoryDeltaRows(monthlyData, categoryKeys);
-  const currentMonthRow = monthlyData.find((item) => item.period === currentMonth);
-  const currentMonthKeys = sortKeysByPeriodAmount(monthlyData, currentMonth, categoryKeys, true);
-  const chartData = currentMonthKeys.map((name) => ({ name, amount_ars: Number(currentMonthRow?.[name] ?? 0) }));
-  const currentMonthTotal = chartData.reduce((sum, item) => sum + item.amount_ars, 0);
+  const cardStatementPeriods = [...(data?.card_statement_periods ?? [])].sort();
+  const currentYearStatementPeriods = cardStatementPeriods.filter((period) => period.startsWith(`${currentYear}-`));
+  const deltaRows = categoryDeltaRows(monthlyData, categoryKeys, currentYearStatementPeriods);
+  const deltaPeriods = deltaRows.map((row) => row.period);
+  const latestCardStatementPeriod = cardStatementPeriods.length ? cardStatementPeriods[cardStatementPeriods.length - 1] : null;
+  const annualAverageYear = currentYear - 1;
+  const averageRows = sortCategoryAverageRows(
+    categoryAverageRows(rawMonthlyData, categoryKeys, latestCardStatementPeriod, cardStatementPeriods, annualAverageYear),
+    averageSort
+  );
   const allCategoryIds = categories.map((category) => Number(category.id));
   const noCategoriesSelected = categoryIds.includes(noDashboardCategoriesSelected);
   const activeChartCategory = activeLegendCategory ?? activeMonthlyCategory;
   const toggleLegendCategory = (name: string) => setActiveLegendCategory((current) => (current === name ? null : name));
+  const updateAverageSort = (key: AverageSortKey) => {
+    setAverageSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "category" ? "asc" : "desc" });
+  };
   return (
     <section className="grid dashboard-grid">
-      <div className="panel chart-panel">
-        <h2>Consumo mes actual</h2>
-        <div className="chart-total">{money(currentMonthTotal)}</div>
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={chartData} margin={{ left: 8, right: 24 }}>
-            <CartesianGrid stroke="#223047" vertical={false} />
-            <XAxis dataKey="name" interval={0} tick={{ fill: "#94a3b8", fontSize: 11 }} />
-            <YAxis tickFormatter={(value) => numberFormat(value)} tick={{ fill: "#94a3b8", fontSize: 12 }} />
-            <Tooltip
-              formatter={(value) => [money(Number(value)), "Consumo"]}
-              cursor={false}
-              contentStyle={{ background: "#0f172a", border: "1px solid #263449", color: "#e2e8f0" }}
-              itemStyle={{ color: "#e2e8f0" }}
-              labelStyle={{ color: "#e2e8f0" }}
-            />
-            <Bar dataKey="amount_ars" name="Consumo" radius={[4, 4, 0, 0]} isAnimationActive={false} activeBar={false}>
-              {chartData.map((item) => (
-                <Cell
-                  key={item.name}
-                  fill={categoryColor(item.name, categories, currentMonthKeys)}
-                  fillOpacity={categoryOpacity(activeChartCategory, item.name)}
-                  stroke={activeChartCategory === item.name ? "#f8fafc" : undefined}
-                  strokeWidth={activeChartCategory === item.name ? 2 : 0}
-                />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
-        <CategoryLegend categories={categories} names={legendKeys} active={activeChartCategory} onToggle={toggleLegendCategory} />
-      </div>
-      <div className="panel dashboard-filters">
+      <div className="panel dashboard-filters wide">
         <h2>Filtros</h2>
         <div className="filter-summary-row">
           <label>
@@ -995,20 +1033,86 @@ function Dashboard({
         <CategoryLegend categories={categories} names={legendKeys.filter((name) => cumulativeKeys.includes(name))} active={activeChartCategory} onToggle={toggleLegendCategory} />
       </div>
       <div className="panel chart-panel wide">
+        <h2>Promedio mensual por categoria</h2>
+        {latestCardStatementPeriod ? (
+          <div className="average-table-wrap">
+            <table className="average-table">
+              <thead>
+                <tr>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("category")}>
+                      Categoria{averageSortIndicator(averageSort, "category")}
+                    </button>
+                  </th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("lastMonth")}>
+                      <span className="header-lines">
+                        <span>Ultimo mes</span>
+                        <span>({axisMonthLabel(latestCardStatementPeriod)}){averageSortIndicator(averageSort, "lastMonth")}</span>
+                      </span>
+                    </button>
+                  </th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("average3")}>
+                      <span className="header-lines">
+                        <span>Promedio mensual</span>
+                        <span>(3 meses){averageSortIndicator(averageSort, "average3")}</span>
+                      </span>
+                    </button>
+                  </th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("average6")}>
+                      <span className="header-lines">
+                        <span>Promedio mensual</span>
+                        <span>(6 meses){averageSortIndicator(averageSort, "average6")}</span>
+                      </span>
+                    </button>
+                  </th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("annualAverage")}>
+                      <span className="header-lines">
+                        <span>Promedio anual</span>
+                        <span>({annualAverageYear}){averageSortIndicator(averageSort, "annualAverage")}</span>
+                      </span>
+                    </button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {averageRows.map((row) => (
+                  <tr key={row.key}>
+                    <td>
+                      <span className="category-cell">
+                        <i style={{ background: categoryColor(row.key, categories, legendKeys) }} />
+                        {row.key}
+                      </span>
+                    </td>
+                    <td>{money(row.lastMonth)}</td>
+                    <td>{money(row.average3)}</td>
+                    <td>{money(row.average6)}</td>
+                    <td>{row.annualAverage ? money(row.annualAverage) : "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="muted">Todavia no hay resumenes de tarjeta comparables para esta vista.</p>}
+      </div>
+      <div className="panel chart-panel wide">
         <h2>Variacion mensual por categoria {currentYear}</h2>
         <div className="delta-table-wrap">
           <table className="delta-table">
             <thead>
               <tr>
                 <th>Categoria</th>
-                {periods.map((period) => <th key={period}>{axisMonthLabel(period)}</th>)}
+                {deltaPeriods.map((period) => <th key={period}>{axisMonthLabel(period)}</th>)}
               </tr>
             </thead>
             <tbody>
               {categoryKeys.map((key) => (
                 <tr key={key}>
                   <td>{key}</td>
-                  {periods.map((period) => {
+                  {deltaPeriods.map((period) => {
                     const value = deltaRows.find((row) => row.period === period)?.values.find((item) => item.key === key) ?? { percent: 0 };
                     return (
                     <td key={period}>
@@ -1118,7 +1222,34 @@ function Expenses(props: {
   const visibleTotals = totalsByCurrency(props.expenses);
   const periods = Object.keys(groupedExpenses).sort().reverse();
   const hasActiveFilters = !!props.query.trim() || props.paidBy !== "all" || props.currencyFilter !== "all";
-  const isMonthExpanded = (period: string) => hasActiveFilters ? true : (expandedMonths[period] ?? period === currentMonth);
+  const activeFilterKey = `${props.query.trim().toLowerCase()}|${props.paidBy}|${props.currencyFilter}`;
+  const periodKey = periods.join("|");
+  const previousFilterKey = useRef(activeFilterKey);
+  useEffect(() => {
+    const filterChanged = previousFilterKey.current !== activeFilterKey;
+    previousFilterKey.current = activeFilterKey;
+    if (!hasActiveFilters) return;
+    setExpandedMonths((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const period of periods) {
+        if ((filterChanged || next[period] === undefined) && next[period] !== true) {
+          next[period] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [activeFilterKey, hasActiveFilters, periodKey]);
+  const isMonthExpanded = (period: string) => expandedMonths[period] ?? period === currentMonth;
+  const allMonthsExpanded = periods.length > 0 && periods.every((period) => isMonthExpanded(period));
+  const setAllMonthsExpanded = (expanded: boolean) => {
+    setExpandedMonths((current) => {
+      const next = { ...current };
+      for (const period of periods) next[period] = expanded;
+      return next;
+    });
+  };
   const updateSort = (key: ExpenseSortKey) => {
     setSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "amount" || key === "date" ? "desc" : "asc" });
   };
@@ -1219,8 +1350,29 @@ function Expenses(props: {
                 <span>Total USD <strong>{money(visibleTotals.USD ?? 0, "USD")}</strong></span>
               </div>
             </div>
+            <button
+              className="primary month-bulk-toggle"
+              type="button"
+              disabled={!periods.length}
+              onClick={() => setAllMonthsExpanded(!allMonthsExpanded)}
+              aria-label={allMonthsExpanded ? "Colapsar todos los meses" : "Expandir todos los meses"}
+            >
+              {allMonthsExpanded ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              {allMonthsExpanded ? "Colapsar todos" : "Expandir todos"}
+            </button>
           </div>
-          <table>
+          <table className="expense-table">
+            <colgroup>
+              <col className="expense-date-col" />
+              <col className="expense-description-col" />
+              <col className="expense-paid-col" />
+              <col className="expense-category-col" />
+              <col className="expense-source-col" />
+              <col className="expense-recurring-col" />
+              <col className="expense-amount-col" />
+              <col className="expense-note-col" />
+              <col className="expense-actions-col" />
+            </colgroup>
             <thead>
               <tr>
                 <th><button className="sort-header" onClick={() => updateSort("date")}>Fecha{sortIndicator(sort, "date")}</button></th>
@@ -1265,9 +1417,9 @@ function Expenses(props: {
                         <Fragment key={expense.id}>
                           <tr className={!expense.category_id ? "needs-review-row" : undefined}>
                             <td>{expense.date}</td>
-                            <td>{expense.description}</td>
+                            <td className="description-cell">{expense.description}</td>
                             <td>{props.users.find((u) => u.id === expense.paid_by_user_id)?.display_name ?? "Usuario"}</td>
-                            <td>
+                            <td className="category-cell">
                               {isEditing ? (
                                 <div className="inline-edit-fields">
                                   <select
@@ -1320,7 +1472,7 @@ function Expenses(props: {
                                 money(expense.original_amount, expense.currency)
                               )}
                             </td>
-                            <td>
+                            <td className="note-cell">
                               {isEditing ? (
                                 <textarea className="note-edit" value={editNotes} onChange={(event) => setEditNotes(event.target.value.slice(0, 500))} aria-label={`Editar nota ${expense.description}`} maxLength={500} />
                               ) : hasNotes ? (
@@ -1331,7 +1483,7 @@ function Expenses(props: {
                                 <span className="muted">-</span>
                               )}
                             </td>
-                            <td>
+                            <td className="actions-cell">
                               {isEditing ? (
                                 <div className="row-actions">
                                   <button
@@ -1405,6 +1557,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
   const [reimbursementByLine, setReimbursementByLine] = useState<Record<number, boolean>>({});
   const [paidByByHolder, setPaidByByHolder] = useState<Record<string, string>>({});
   const [copiedHolder, setCopiedHolder] = useState<string | null>(null);
+  const [statementPeriod, setStatementPeriod] = useState("");
   const [paidByUserId, setPaidByUserId] = useState(String(users[0]?.id ?? 1));
   const queryClient = useQueryClient();
   const pendingImports = useQuery({ queryKey: ["imports", homeId, "parsed"], queryFn: () => api.imports(homeId, "parsed") });
@@ -1417,8 +1570,21 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
     setNotesByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.notes ?? ""])));
     setReimbursementByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.kind === "reimbursement"])));
     setPaidByByHolder(Object.fromEntries(Array.from(new Set(data.lines.map(cardholderKey))).map((holder) => [holder, userIdForCardholder(holder, users, String(users[0]?.id ?? 1))])));
+    setStatementPeriod(data.statement_period ?? "");
     setCopiedHolder(null);
   };
+  const updateBatch = useMutation({
+    mutationFn: ({ batchId, nextStatementPeriod }: { batchId: number; nextStatementPeriod: string }) =>
+      api.updateImportBatch(homeId, batchId, { statement_period: nextStatementPeriod || null }),
+    onSuccess: (data) => {
+      setBatch(data);
+      setStatementPeriod(data.statement_period ?? "");
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId, "parsed"] });
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId, "all"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
   const uploadCard = useMutation({
     mutationFn: (file: File) => api.uploadCardImport(homeId, file),
     onSuccess: (data) => {
@@ -1434,7 +1600,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
     }
   });
   const commit = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const rejected = (batch?.lines ?? [])
         .filter((line) => line.status === "pending" && !selected.includes(line.id) && !isIgnoredImportLine(line))
         .map((line) => line.id);
@@ -1443,6 +1609,9 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
           .filter((line) => selected.includes(line.id))
           .map((line) => [line.id, Number(paidByByHolder[cardholderKey(line)] ?? paidByUserId)])
       );
+      if (batch!.source_type !== "bbva_account_xls" && statementPeriod !== (batch!.statement_period ?? "")) {
+        await api.updateImportBatch(homeId, batch!.id, { statement_period: statementPeriod || null });
+      }
       return api.commitImport(homeId, batch!.id, selected, Number(paidByUserId), categoryByLine, subcategoryByLine, recurringByLine, notesByLine, reimbursementByLine, paidByOverrides, rejected);
     },
     onSuccess: () => {
@@ -1456,8 +1625,11 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
       setNotesByLine({});
       setReimbursementByLine({});
       setPaidByByHolder({});
+      setStatementPeriod("");
       setCopiedHolder(null);
       queryClient.invalidateQueries({ queryKey: ["imports", homeId, "parsed"] });
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId, "all"] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
     }
   });
   const deleteImport = useMutation({
@@ -1472,6 +1644,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
         setNotesByLine({});
         setReimbursementByLine({});
         setPaidByByHolder({});
+        setStatementPeriod("");
         setCopiedHolder(null);
       }
       queryClient.invalidateQueries({ queryKey: ["imports", homeId, "parsed"] });
@@ -1585,10 +1758,26 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
               </div>
             </div>
             <div className="toolbar compact">
+              {batch.source_type !== "bbva_account_xls" && (
+                <label className="statement-period-control">
+                  <span>Mes del resumen</span>
+                  <input
+                    type="month"
+                    value={statementPeriod}
+                    onChange={(event) => setStatementPeriod(event.target.value)}
+                    onBlur={() => {
+                      if (statementPeriod !== (batch.statement_period ?? "")) {
+                        updateBatch.mutate({ batchId: batch.id, nextStatementPeriod: statementPeriod });
+                      }
+                    }}
+                    aria-label="Mes del resumen de tarjeta"
+                  />
+                </label>
+              )}
               <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagador del resumen">
                 {users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
               </select>
-              <button className="primary" disabled={!selected.length || commit.isPending} onClick={() => commit.mutate()}>
+              <button className="primary" disabled={!selected.length || commit.isPending || updateBatch.isPending} onClick={() => commit.mutate()}>
                 Procesar {selected.length} lineas
               </button>
             </div>

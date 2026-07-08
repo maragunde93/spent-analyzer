@@ -44,6 +44,8 @@ def ensure_incremental_schema() -> None:
             import_batch_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(import_batches)"))}
             if "fx_rate_ars_per_usd" not in import_batch_columns:
                 connection.execute(text("ALTER TABLE import_batches ADD COLUMN fx_rate_ars_per_usd NUMERIC(14, 4)"))
+            if "statement_period" not in import_batch_columns:
+                connection.execute(text("ALTER TABLE import_batches ADD COLUMN statement_period VARCHAR(7)"))
             import_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(import_lines)"))}
             if "suggested_subcategory_id" not in import_columns:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
@@ -76,6 +78,7 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS notes TEXT"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS fx_rate_ars_per_usd NUMERIC(14, 4)"))
+            connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS statement_period VARCHAR(7)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS notes TEXT"))

@@ -110,6 +110,48 @@ test("expenses can be filtered by original currency", async ({ page, request }) 
   await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toHaveCount(0);
 });
 
+test("expense month groups can be collapsed while searching and after clearing search", async ({ page, request }) => {
+  await request.post("http://127.0.0.1:8000/households/1/expenses", {
+    headers: { "X-Test-User-Email": "mauro@example.test" },
+    data: {
+      date: "2026-06-15",
+      description: "Filtro colapso junio",
+      category_id: null,
+      paid_by_user_id: 1,
+      currency: "ARS",
+      original_amount: "2300.00",
+      source: "manual"
+    }
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Consumos" }).click();
+  await expect(page.getByRole("heading", { name: "Consumos del hogar" })).toBeVisible();
+
+  await page.getByPlaceholder("Buscar gasto").fill("Filtro colapso");
+  await expect(page.getByText("Filtro colapso junio")).toBeVisible();
+
+  await page.getByRole("button", { name: /Colapsar todos/ }).click();
+  await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Expandir todos/ })).toBeVisible();
+
+  await page.getByRole("button", { name: /Expandir todos/ }).click();
+  await expect(page.getByText("Filtro colapso junio")).toBeVisible();
+
+  await page.getByRole("button", { name: /Colapsar junio de 2026/i }).click();
+  await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Expandir junio de 2026/i })).toBeVisible();
+
+  await page.getByPlaceholder("Buscar gasto").fill("");
+  await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
+
+  await page.getByRole("button", { name: /Expandir junio de 2026/i }).click();
+  await expect(page.getByText("Filtro colapso junio")).toBeVisible();
+  await page.getByRole("button", { name: /Expandir todos/ }).click();
+  await page.getByRole("button", { name: /Colapsar todos/ }).click();
+  await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
+});
+
 test("processing all selected card lines clears that import from pending imports", async ({ page, request }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();

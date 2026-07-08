@@ -22,10 +22,12 @@ class DashboardRecurringTests(unittest.TestCase):
         Base.metadata.create_all(self.engine)
         self.db = Session(self.engine)
         self.user = User(email="mauro@example.test", display_name="Mauro")
+        self.other_user = User(email="mica@example.test", display_name="Mica")
         self.home = HomeGroup(name="Casa")
-        self.db.add_all([self.user, self.home])
+        self.db.add_all([self.user, self.other_user, self.home])
         self.db.flush()
         self.db.add(Membership(user_id=self.user.id, home_group_id=self.home.id, role="owner"))
+        self.db.add(Membership(user_id=self.other_user.id, home_group_id=self.home.id, role="member"))
         self.services = Category(home_group_id=self.home.id, name="Servicios", color="#ff9800", icon="receipt")
         self.subscriptions = Category(home_group_id=self.home.id, name="Suscripciones", color="#ffc107", icon="repeat")
         self.db.add_all([self.services, self.subscriptions])
@@ -85,6 +87,54 @@ class DashboardRecurringTests(unittest.TestCase):
 
         self.assertIn("Crunchyroll", names)
 
+    def test_card_statement_periods_use_household_common_or_filtered_user(self):
+        mauro_may_batch = self._card_batch("13-Jun-26")
+        mauro_may_line = self._card_line(mauro_may_batch, date(2026, 5, 18), "CRUNCHYROLL", Decimal("8000.00"))
+        self._expense(
+            date(2026, 5, 18),
+            "CRUNCHYROLL",
+            self.subscriptions.id,
+            None,
+            Decimal("8000.00"),
+            False,
+            source=ExpenseSource.import_pdf,
+            import_line_id=mauro_may_line.id,
+            paid_by_user_id=self.user.id,
+        )
+        mauro_june_batch = self._card_batch("13-Jul-26")
+        mauro_june_line = self._card_line(mauro_june_batch, date(2026, 6, 18), "CRUNCHYROLL", Decimal("9000.00"))
+        self._expense(
+            date(2026, 6, 18),
+            "CRUNCHYROLL",
+            self.subscriptions.id,
+            None,
+            Decimal("9000.00"),
+            False,
+            source=ExpenseSource.import_pdf,
+            import_line_id=mauro_june_line.id,
+            paid_by_user_id=self.user.id,
+        )
+        mica_may_batch = self._card_batch("13-Jun-26")
+        mica_may_line = self._card_line(mica_may_batch, date(2026, 5, 20), "PEDIDOSYA", Decimal("12000.00"))
+        self._expense(
+            date(2026, 5, 20),
+            "PEDIDOSYA",
+            self.subscriptions.id,
+            None,
+            Decimal("12000.00"),
+            False,
+            source=ExpenseSource.import_pdf,
+            import_line_id=mica_may_line.id,
+            paid_by_user_id=self.other_user.id,
+        )
+        self.db.commit()
+
+        household_result = dashboard(self.home.id, user=self.user, db=self.db)
+        mauro_result = dashboard(self.home.id, paid_by_user_id=self.user.id, user=self.user, db=self.db)
+
+        self.assertEqual(household_result.card_statement_periods, ["2026-05"])
+        self.assertEqual(mauro_result.card_statement_periods, ["2026-05", "2026-06"])
+
     def _expense(
         self,
         expense_date: date,
@@ -95,6 +145,7 @@ class DashboardRecurringTests(unittest.TestCase):
         is_recurring: bool,
         source: ExpenseSource = ExpenseSource.bank_import,
         import_line_id: int | None = None,
+        paid_by_user_id: int | None = None,
     ) -> Expense:
         expense = Expense(
             home_group_id=self.home.id,
@@ -102,7 +153,7 @@ class DashboardRecurringTests(unittest.TestCase):
             description=description,
             category_id=category_id,
             subcategory_id=subcategory_id,
-            paid_by_user_id=self.user.id,
+            paid_by_user_id=paid_by_user_id or self.user.id,
             uploaded_by_user_id=self.user.id,
             source=source,
             currency=Currency.ARS,

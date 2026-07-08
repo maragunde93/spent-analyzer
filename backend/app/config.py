@@ -54,3 +54,7 @@ def validate_production_settings(settings: Settings) -> None:
     has_local_auth = bool(settings.local_users)
     if not has_google_auth and not has_local_auth:
         raise RuntimeError("Configure either SPENT_LOCAL_USERS or Google OAuth settings in production")
+
+
+def should_seed_development_data(settings: Settings) -> bool:
+    return settings.environment.lower() != "production"

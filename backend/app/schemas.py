@@ -126,6 +126,7 @@ class DashboardSummary(BaseModel):
     trend: list[dict]
     monthly_by_category: list[dict] = []
     cumulative_by_category: list[dict] = []
+    card_statement_periods: list[str] = []
     recurring_preview: list[dict]
     fx_rate: DashboardFxRate | None = None
 
@@ -156,11 +157,16 @@ class ImportBatchRead(BaseModel):
     uploaded_by_user_id: int
     statement_account: str | None
     period_label: str | None
+    statement_period: str | None = None
     fx_rate_ars_per_usd: Decimal | None = None
     status: str
     created_at: str | None = None
     paid_by_user_ids: list[int] = []
     lines: list[ImportLineRead] = []
+
+
+class ImportBatchUpdate(BaseModel):
+    statement_period: str | None = None
 
 
 class ImportCommitRequest(BaseModel):
