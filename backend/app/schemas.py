@@ -25,6 +25,12 @@ class MemberRead(BaseModel):
     email: str
     display_name: str
     role: str
+    consumption_count: int = 0
+
+
+class MemberUpdate(BaseModel):
+    email: str = Field(max_length=255)
+    display_name: str = Field(max_length=120)
 
 
 class SubcategoryRead(BaseModel):

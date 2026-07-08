@@ -23,6 +23,7 @@ import {
   SwatchBook,
   Trash2,
   Upload,
+  UserCircle,
   WalletCards,
   Wrench,
   X
@@ -524,7 +525,10 @@ export function App() {
           </div>
           <div className="top-actions">
             {section === "dashboard" && dashboard.data?.fx_rate && <FxRateBadge fxRate={dashboard.data.fx_rate} />}
-            <span className="user-chip">{authenticatedUser.display_name}</span>
+            <button className="user-chip" type="button" title="Ver mi usuario" onClick={() => setSection("profile")}>
+              <UserCircle size={16} />
+              {authenticatedUser.display_name}
+            </button>
             <button className="icon-button" title="Alertas"><Bell size={18} /></button>
             <button className="icon-button" title="Cerrar sesion" onClick={() => logout.mutate()}><LogOut size={18} /></button>
           </div>
@@ -561,6 +565,7 @@ export function App() {
         {section === "history" && <HistoryPanel users={people} homeId={homeId} />}
         {section === "receipts" && <ReceiptsLab categories={cats} expenses={expenses.data ?? []} homeId={homeId} />}
         {section === "settings" && <SettingsPanel categories={cats} users={people} homeId={homeId} />}
+        {section === "profile" && <UserProfile currentUser={authenticatedUser} users={people} homeName={households.data?.[0]?.name ?? "Casa Adrogue"} />}
       </main>
     </div>
   );
@@ -630,8 +635,68 @@ function titleFor(section: string) {
     cash: "Billetera de efectivo",
     history: "Historial",
     receipts: "Tickets de compras",
-    settings: "Configuracion de casa"
+    settings: "Configuracion de casa",
+    profile: "Mi usuario"
   }[section];
+}
+
+function UserProfile({ currentUser, users, homeName }: { currentUser: User; users: User[]; homeName: string }) {
+  const member = users.find((user) => user.id === currentUser.id);
+  const sameNameMembers = users.filter(
+    (user) => user.id !== currentUser.id && user.display_name.trim().toLowerCase() === currentUser.display_name.trim().toLowerCase()
+  );
+  return (
+    <section className="grid two">
+      <div className="panel profile-panel">
+        <h2>Usuario autenticado</h2>
+        <div className="profile-identity">
+          <UserCircle size={42} />
+          <div>
+            <strong>{currentUser.display_name}</strong>
+            <span>{currentUser.email}</span>
+          </div>
+        </div>
+        <dl className="profile-details">
+          <div>
+            <dt>ID</dt>
+            <dd>#{currentUser.id}</dd>
+          </div>
+          <div>
+            <dt>Rol en la casa</dt>
+            <dd>{member?.role ?? "Sin membresia"}</dd>
+          </div>
+          <div>
+            <dt>Consumos asociados</dt>
+            <dd>{numberFormat(member?.consumption_count ?? 0)}</dd>
+          </div>
+          <div>
+            <dt>Casa</dt>
+            <dd>{homeName}</dd>
+          </div>
+        </dl>
+      </div>
+      <div className="panel profile-panel">
+        <h2>Coincidencias</h2>
+        {sameNameMembers.length ? (
+          <div className="stack">
+            <p className="warning">Hay otros miembros con el mismo nombre visible. Para distinguirlos, usá el mail o el ID.</p>
+            {sameNameMembers.map((user) => (
+              <div className="member-row profile-match-row" key={user.id}>
+                <div className="member-name">
+                  <strong>{user.display_name}</strong>
+                  <small>#{user.id} - {user.role ?? "member"}</small>
+                </div>
+                <span>{user.email}</span>
+                <strong>{numberFormat(user.consumption_count ?? 0)}</strong>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">No hay otros miembros con el mismo nombre visible.</p>
+        )}
+      </div>
+    </section>
+  );
 }
 
 function FxRateBadge({
@@ -2237,6 +2302,9 @@ function ReceiptsLab({ categories, expenses, homeId }: { categories: Category[];
 function SettingsPanel({ categories, users, homeId }: { categories: Category[]; users: User[]; homeId: number }) {
   const [name, setName] = useState("");
   const [color, setColor] = useState("#38bdf8");
+  const [editingUserId, setEditingUserId] = useState<number | null>(null);
+  const [editUserName, setEditUserName] = useState("");
+  const [editUserEmail, setEditUserEmail] = useState("");
   const [editingCategoryId, setEditingCategoryId] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
   const [editColor, setEditColor] = useState("#38bdf8");
@@ -2246,6 +2314,31 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
   const [editSubcategoryName, setEditSubcategoryName] = useState("");
   const queryClient = useQueryClient();
   const selectedSubcategoryCategory = categories.find((category) => category.id === selectedSubcategoryCategoryId) ?? categories[0];
+  const updateMember = useMutation({
+    mutationFn: ({ id, nextName, nextEmail }: { id: number; nextName: string; nextEmail: string }) =>
+      api.updateMember(homeId, id, { display_name: nextName, email: nextEmail }),
+    onSuccess: () => {
+      setEditingUserId(null);
+      setEditUserName("");
+      setEditUserEmail("");
+      queryClient.invalidateQueries({ queryKey: ["members", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  const deleteMember = useMutation({
+    mutationFn: (id: number) => api.deleteMember(homeId, id),
+    onSuccess: (_, deletedId) => {
+      if (editingUserId === deletedId) {
+        setEditingUserId(null);
+        setEditUserName("");
+        setEditUserEmail("");
+      }
+      queryClient.invalidateQueries({ queryKey: ["members", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
   const createCategory = useMutation({
     mutationFn: () => api.createCategory(homeId, { name, color, icon: "tag" }),
     onSuccess: () => {
@@ -2308,7 +2401,80 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
     <section className="grid two">
       <div className="panel">
         <h2>Miembros</h2>
-        {users.map((user) => <div className="list-row" key={user.id}><span>{user.display_name}</span><strong>{user.role ?? "member"}</strong></div>)}
+        <div className="member-list">
+          <div className="member-row member-header">
+            <span>Nombre</span>
+            <span>Mail</span>
+            <span>Consumos</span>
+            <span>Acciones</span>
+          </div>
+          {users.map((user) => {
+            const isEditing = editingUserId === user.id;
+            return (
+              <div className="member-row" key={user.id}>
+                {isEditing ? (
+                  <>
+                    <input value={editUserName} onChange={(event) => setEditUserName(event.target.value)} aria-label={`Nombre usuario ${user.display_name}`} />
+                    <input value={editUserEmail} onChange={(event) => setEditUserEmail(event.target.value)} aria-label={`Mail usuario ${user.display_name}`} />
+                    <strong>{numberFormat(user.consumption_count ?? 0)}</strong>
+                    <div className="row-actions">
+                      <button
+                        className="icon-button"
+                        title="Guardar usuario"
+                        aria-label={`Guardar usuario ${user.display_name}`}
+                        disabled={!editUserName.trim() || !editUserEmail.trim() || updateMember.isPending}
+                        onClick={() => updateMember.mutate({ id: user.id, nextName: editUserName.trim(), nextEmail: editUserEmail.trim() })}
+                      >
+                        <Save size={16} />
+                      </button>
+                      <button className="icon-button" title="Cancelar" aria-label="Cancelar edicion de usuario" onClick={() => setEditingUserId(null)}>
+                        <X size={16} />
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="member-name">
+                      <strong>{user.display_name}</strong>
+                      <small>{user.role ?? "member"}</small>
+                    </div>
+                    <span>{user.email}</span>
+                    <strong>{numberFormat(user.consumption_count ?? 0)}</strong>
+                    <div className="row-actions">
+                      <button
+                        className="icon-button"
+                        title="Editar usuario"
+                        aria-label={`Editar usuario ${user.display_name}`}
+                        onClick={() => {
+                          setEditingUserId(user.id);
+                          setEditUserName(user.display_name);
+                          setEditUserEmail(user.email);
+                        }}
+                      >
+                        <Settings size={16} />
+                      </button>
+                      <button
+                        className="icon-button danger"
+                        title={user.consumption_count ? "No se puede eliminar con consumos asociados" : "Eliminar usuario"}
+                        aria-label={`Eliminar usuario ${user.display_name}`}
+                        disabled={deleteMember.isPending || Boolean(user.consumption_count)}
+                        onClick={() => {
+                          if (window.confirm(`Eliminar a "${user.display_name}" de la casa? Solo se permite si no tiene consumos asociados.`)) {
+                            deleteMember.mutate(user.id);
+                          }
+                        }}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {updateMember.isError && <p className="form-error settings-error">No se pudo editar el usuario. Revisá que el mail no este repetido.</p>}
+        {deleteMember.isError && <p className="form-error settings-error">No se pudo eliminar el usuario. Solo se pueden borrar usuarios sin consumos asociados.</p>}
       </div>
       <div className="panel">
         <h2>Categorias</h2>
@@ -2513,6 +2679,8 @@ function actionLabel(action: string) {
     expense_create: "Gasto creado",
     expense_update: "Gasto editado",
     expense_delete: "Gasto eliminado",
+    member_update: "Usuario editado",
+    member_delete: "Usuario eliminado",
     import_upload: "Statement cargado",
     import_commit: "Importacion procesada",
     import_delete: "Importacion borrada",

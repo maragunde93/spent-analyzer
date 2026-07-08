@@ -21,6 +21,7 @@ export type User = {
   email: string;
   display_name: string;
   role?: string;
+  consumption_count?: number;
 };
 
 export type HomeGroup = {

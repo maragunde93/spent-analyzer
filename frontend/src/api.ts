@@ -36,9 +36,24 @@ export const api = {
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   households: () => request<HomeGroup[]>("/households", undefined, [{ id: 1, name: "Casa Adrogue" }]),
   members: (homeId: number) => request<User[]>(`/households/${homeId}/members`, undefined, [
-    { id: 1, email: "mauro@example.test", display_name: "Mauro", role: "owner" },
-    { id: 2, email: "mica@example.test", display_name: "Mica", role: "member" }
+    { id: 1, email: "mauro@example.test", display_name: "Mauro", role: "owner", consumption_count: 3 },
+    { id: 2, email: "mica@example.test", display_name: "Mica", role: "member", consumption_count: 2 }
   ]),
+  updateMember: (homeId: number, userId: number, payload: Pick<User, "email" | "display_name">) =>
+    request<User>(
+      `/households/${homeId}/members/${userId}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      },
+      { id: userId, role: "member", consumption_count: 0, ...payload }
+    ),
+  deleteMember: (homeId: number, userId: number) =>
+    request<{ ok: boolean }>(
+      `/households/${homeId}/members/${userId}`,
+      { method: "DELETE" }
+    ),
   dashboard: (homeId: number, paidByUserId?: string, categoryIds: number[] = []) => {
     const search = new URLSearchParams();
     if (paidByUserId && paidByUserId !== "all") search.set("paid_by_user_id", paidByUserId);
