@@ -11,10 +11,10 @@ from sqlalchemy import create_engine
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.api.imports import commit_import
+from app.api.imports import _read_batch, commit_import
 from app.database import Base
 from app.domain import Currency, ImportLineKind
-from app.models import Category, Earning, Expense, HomeGroup, ImportBatch, ImportLine, Membership, User
+from app.models import Category, Earning, Expense, FxRate, HomeGroup, ImportBatch, ImportLine, Membership, User
 from app.schemas import ImportCommitRequest
 
 
@@ -188,6 +188,41 @@ class ImportCommitAccountingTests(unittest.TestCase):
         self.assertIsNone(self.db.scalar(select(Expense).where(Expense.import_line_id == rejected_line.id)))
         self.assertEqual(self.db.get(ImportLine, rejected_line.id).status, "ignored")
 
+    def test_card_usd_import_uses_captured_batch_blue_rate(self):
+        self.db.add(
+            FxRate(
+                date=date(2026, 7, 6),
+                source="blue_average",
+                from_currency=Currency.USD,
+                to_currency=Currency.ARS,
+                rate=Decimal("1600.0000"),
+            )
+        )
+        batch = self._batch("bbva_visa_pdf")
+        batch.fx_rate_ars_per_usd = Decimal("1500.0000")
+        line = self._line(
+            batch,
+            "STEAMGAMES.COM",
+            ImportLineKind.purchase,
+            Decimal("10.00"),
+            currency=Currency.USD,
+            suggested_category_id=self.services.id,
+        )
+        self.db.commit()
+
+        commit_import(
+            self.home.id,
+            batch.id,
+            ImportCommitRequest(line_ids=[line.id], paid_by_user_id=self.user.id),
+            self.user,
+            self.db,
+        )
+
+        expense = self.db.scalar(select(Expense).where(Expense.import_line_id == line.id))
+        self.assertIsNotNone(expense)
+        self.assertEqual(expense.amount_ars, Decimal("15000.00"))
+        self.assertEqual(_read_batch(self.db, batch.id).fx_rate_ars_per_usd, Decimal("1500.0000"))
+
     def _batch(self, source_type: str) -> ImportBatch:
         batch = ImportBatch(
             home_group_id=self.home.id,
@@ -205,6 +240,7 @@ class ImportCommitAccountingTests(unittest.TestCase):
         description: str,
         kind: ImportLineKind,
         amount: Decimal,
+        currency: Currency = Currency.ARS,
         suggested_category_id: int | None = None,
         suggested_recurring: bool = False,
     ) -> ImportLine:
@@ -214,7 +250,7 @@ class ImportCommitAccountingTests(unittest.TestCase):
             date=date(2026, 7, 6),
             description=description,
             kind=kind,
-            currency=Currency.ARS,
+            currency=currency,
             original_amount=amount,
             suggested_category_id=suggested_category_id,
             suggested_recurring=suggested_recurring,

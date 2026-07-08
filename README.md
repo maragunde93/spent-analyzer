@@ -43,7 +43,15 @@ Open `http://localhost:5173`.
 docker compose up --build
 ```
 
-The web UI is exposed at `http://localhost:8080` and proxies `/api` to the FastAPI service.
+The web UI is exposed at `http://localhost:8080/finance/` and proxies `/finance/api/` to the FastAPI service.
+The local Docker stack uses the same local username/password auth flow as production:
+
+```text
+usuario: mauro
+contrasena: local-password-123
+```
+
+The direct API port remains available at `http://localhost:8000` for debugging.
 
 ## Containerized tests
 
