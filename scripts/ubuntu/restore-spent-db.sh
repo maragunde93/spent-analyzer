@@ -53,9 +53,14 @@ if [ -n "${SPENT_USER_EMAIL_MAPPINGS:-}" ]; then
     fi
     docker compose -p "$compose_project" -f "$compose_file" --env-file "$env_file" exec -T "$db_service" \
       psql -U "$db_user" -d "$db_name" \
+      -v ON_ERROR_STOP=1 \
       -v old_email="$old_email" \
-      -v new_email="$new_email" \
-      -c "UPDATE users SET email = :'new_email' WHERE email = :'old_email' AND google_sub IS NULL;"
+      -v new_email="$new_email" <<'SQL'
+UPDATE users
+SET email = :'new_email'
+WHERE email = :'old_email'
+  AND google_sub IS NULL;
+SQL
   done
 fi
 

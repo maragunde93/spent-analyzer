@@ -15,9 +15,6 @@ def main() -> int:
     parser.add_argument("--password", help="Password to hash. Omit to be prompted without echo.")
     args = parser.parse_args()
     password = args.password or getpass.getpass("Password: ")
-    if len(password) < 12:
-        print("Use at least 12 characters for the production password.", file=sys.stderr)
-        return 1
     print(hash_password(password))
     return 0
 

@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_home_member
 from app.database import get_db
 from app.models import Category, Expense, HomeGroup, ImportLine, Membership, Merchant, ReceiptImport, ReceiptItem, RecurringRule, Subcategory, User
-from app.schemas import CategoryCreate, CategoryRead, CategoryUpdate, HomeGroupRead, MemberRead, SubcategoryCreate, SubcategoryUpdate
+from app.schemas import CategoryCreate, CategoryRead, CategoryUpdate, HomeGroupRead, MemberRead, MemberUpdate, SubcategoryCreate, SubcategoryUpdate
 from app.services.audit import log_action
 
 router = APIRouter(prefix="/households", tags=["households"])
@@ -153,10 +153,110 @@ def list_members(home_group_id: int, user: User = Depends(get_current_user), db:
     )
     if not any(member.user_id == user.id for member, _ in memberships):
         return []
+    consumption_counts = {
+        user_id: count
+        for user_id, count in db.execute(
+            select(Expense.paid_by_user_id, func.count(Expense.id))
+            .where(Expense.home_group_id == home_group_id)
+            .group_by(Expense.paid_by_user_id)
+        )
+    }
     return [
-        MemberRead(id=member_user.id, email=member_user.email, display_name=member_user.display_name, role=member.role)
+        MemberRead(
+            id=member_user.id,
+            email=member_user.email,
+            display_name=member_user.display_name,
+            role=member.role,
+            consumption_count=int(consumption_counts.get(member_user.id, 0)),
+        )
         for member, member_user in memberships
     ]
+
+
+@router.put("/{home_group_id}/members/{member_user_id}", response_model=MemberRead)
+def update_member(
+    home_group_id: int,
+    member_user_id: int,
+    payload: MemberUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MemberRead:
+    require_home_member(home_group_id, user, db)
+    membership = db.scalar(
+        select(Membership).where(
+            Membership.home_group_id == home_group_id,
+            Membership.user_id == member_user_id,
+        )
+    )
+    member_user = db.get(User, member_user_id)
+    if membership is None or member_user is None:
+        raise HTTPException(status_code=404, detail="Miembro no encontrado")
+
+    display_name = payload.display_name.strip()
+    email = payload.email.strip().lower()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="El nombre es obligatorio")
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="El mail no es valido")
+    existing = db.scalar(select(User).where(User.email == email, User.id != member_user_id))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Ya existe un usuario con ese mail")
+
+    member_user.display_name = display_name
+    member_user.email = email
+    log_action(db, home_group_id, user.id, "member_update", "member", display_name, member_user.id)
+    db.commit()
+    consumption_count = int(
+        db.scalar(
+            select(func.count(Expense.id)).where(
+                Expense.home_group_id == home_group_id,
+                Expense.paid_by_user_id == member_user.id,
+            )
+        )
+        or 0
+    )
+    return MemberRead(id=member_user.id, email=member_user.email, display_name=member_user.display_name, role=membership.role, consumption_count=consumption_count)
+
+
+@router.delete("/{home_group_id}/members/{member_user_id}")
+def delete_member(
+    home_group_id: int,
+    member_user_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_home_member(home_group_id, user, db)
+    if member_user_id == user.id:
+        raise HTTPException(status_code=400, detail="No podes eliminar tu propio usuario")
+    membership = db.scalar(
+        select(Membership).where(
+            Membership.home_group_id == home_group_id,
+            Membership.user_id == member_user_id,
+        )
+    )
+    if membership is None:
+        return {"ok": True}
+    member_count = int(db.scalar(select(func.count(Membership.id)).where(Membership.home_group_id == home_group_id)) or 0)
+    if member_count <= 1:
+        raise HTTPException(status_code=400, detail="La casa debe conservar al menos un miembro")
+    consumption_count = int(
+        db.scalar(
+            select(func.count(Expense.id)).where(
+                Expense.home_group_id == home_group_id,
+                Expense.paid_by_user_id == member_user_id,
+            )
+        )
+        or 0
+    )
+    if consumption_count:
+        raise HTTPException(status_code=400, detail="No se puede eliminar un usuario con consumos asociados")
+
+    member_user = db.get(User, member_user_id)
+    description = member_user.display_name if member_user is not None else str(member_user_id)
+    log_action(db, home_group_id, user.id, "member_delete", "member", description, member_user_id)
+    db.delete(membership)
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/{home_group_id}/categories/defaults", response_model=list[CategoryRead])

@@ -98,13 +98,15 @@ SPENT_POSTGRES_PASSWORD=replace-with-strong-password
 SPENT_CORS_ORIGINS=["https://homelab.local"]
 SPENT_PUBLIC_BASE_URL=https://homelab.local/finance
 SPENT_PUBLIC_API_BASE_URL=https://homelab.local/finance/api
-SPENT_LOCAL_USERS=[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$260000$..."}]
+SPENT_LOCAL_USERS='[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$260000$..."}]'
 SPENT_SESSION_SECRET=replace-with-long-random-secret
 SPENT_SESSION_COOKIE_PATH=/finance
 SPENT_SESSION_COOKIE_SECURE=true
 SPENT_SESSION_COOKIE_SAMESITE=lax
 SPENT_FX_AUTO_UPDATE_ENABLED=true
 ```
+
+Keep `.env` values containing literal `$` single-quoted. Password hashes commonly contain `$`, and Docker Compose treats unquoted or double-quoted `$...` fragments as variable references.
 
 Deploy:
 
@@ -147,57 +149,7 @@ curl -i -X POST http://localhost:8080/finance/api/auth/login \
 
 ## NGINX Proxy Changes
 
-The current nginx config lives in the `alerting-system` project. Add these routes to `nginx/conf.d/default.conf`:
-
-```nginx
-server {
-    listen 80;
-    server_name _;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name _;
-    resolver 127.0.0.11 valid=30s ipv6=off;
-    client_max_body_size 25m;
-
-    ssl_certificate /etc/nginx/certs/homelab.local.crt;
-    ssl_certificate_key /etc/nginx/certs/homelab.local.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-location = /finance {
-    return 302 /finance/;
-}
-
-location /finance/api/ {
-    set $finance_api_upstream spent-api:8000;
-    rewrite ^/finance/api/(.*)$ /$1 break;
-    proxy_pass http://$finance_api_upstream;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_buffering off;
-}
-
-location /finance/ {
-    set $finance_web_upstream spent-web:80;
-    rewrite ^/finance/(.*)$ /$1 break;
-    proxy_pass http://$finance_web_upstream;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-}
-```
-
-Also add a homepage card pointing to `/finance/`, expose `443:443`, and mount `nginx/certs` into the proxy container as `/etc/nginx/certs:ro`.
-
-Longer term, move `compose/proxy.compose.yml`, `nginx/conf.d`, `nginx/html`, and certificate automation into a standalone `homelab-platform` repo. That should happen when TLS/cert renewal becomes shared infrastructure.
+The live homelab proxy configuration is owned by the `alerting-system` project. Keep Spent Analyzer-specific routes there instead of duplicating nginx snippets in this deployment guide.
 
 ## Database Backup And Restore
 
@@ -216,8 +168,8 @@ SPENT_COMPOSE_FILE=docker-compose.prod.yml SPENT_DB_SERVICE=spent-postgres bash 
 Restore on the Mini PC:
 
 ```bash
-CONFIRM_RESTORE=1 SPENT_USER_EMAIL_MAPPINGS="mauro@example.test=mauro@example.test" \
-  bash scripts/ubuntu/restore-spent-db.sh backups/spent_analyzer_YYYYMMDDTHHMMSSZ.dump
+CONFIRM_RESTORE=1 SPENT_USER_EMAIL_MAPPINGS="mauro@example.test=mauro@homelab.local,mica@example.test=mica@homelab.local" \
+  bash scripts/ubuntu/restore-spent-db.sh backups/spent_analyzer_20260708T164009Z.dump
 ```
 
 For local auth, keep the configured local user email equal to the existing restored user email when possible. If the configured email changes later, use `SPENT_USER_EMAIL_MAPPINGS=old@example.test=new@example.test` during restore.

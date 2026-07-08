@@ -25,6 +25,6 @@ mkdir -p "$backup_dir"
 
 echo "Creating backup: $backup_path"
 docker compose -p "$compose_project" -f "$compose_file" --env-file "$env_file" exec -T "$db_service" \
-  pg_dump -U "$db_user" -d "$db_name" --format=custom --file=- > "$backup_path"
+  pg_dump -U "$db_user" -d "$db_name" --format=custom > "$backup_path"
 
 echo "Backup complete."
