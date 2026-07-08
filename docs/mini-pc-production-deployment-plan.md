@@ -149,57 +149,7 @@ curl -i -X POST http://localhost:8080/finance/api/auth/login \
 
 ## NGINX Proxy Changes
 
-The current nginx config lives in the `alerting-system` project. Add these routes to `nginx/conf.d/default.conf`:
-
-```nginx
-server {
-    listen 80;
-    server_name _;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name _;
-    resolver 127.0.0.11 valid=30s ipv6=off;
-    client_max_body_size 25m;
-
-    ssl_certificate /etc/nginx/certs/homelab.local.crt;
-    ssl_certificate_key /etc/nginx/certs/homelab.local.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-location = /finance {
-    return 302 /finance/;
-}
-
-location /finance/api/ {
-    set $finance_api_upstream spent-api:8000;
-    rewrite ^/finance/api/(.*)$ /$1 break;
-    proxy_pass http://$finance_api_upstream;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_buffering off;
-}
-
-location /finance/ {
-    set $finance_web_upstream spent-web:80;
-    rewrite ^/finance/(.*)$ /$1 break;
-    proxy_pass http://$finance_web_upstream;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-}
-```
-
-Also add a homepage card pointing to `/finance/`, expose `443:443`, and mount `nginx/certs` into the proxy container as `/etc/nginx/certs:ro`.
-
-Longer term, move `compose/proxy.compose.yml`, `nginx/conf.d`, `nginx/html`, and certificate automation into a standalone `homelab-platform` repo. That should happen when TLS/cert renewal becomes shared infrastructure.
+The live homelab proxy configuration is owned by the `alerting-system` project. Keep Spent Analyzer-specific routes there instead of duplicating nginx snippets in this deployment guide.
 
 ## Database Backup And Restore
 
