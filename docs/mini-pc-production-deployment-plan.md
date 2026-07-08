@@ -98,13 +98,15 @@ SPENT_POSTGRES_PASSWORD=replace-with-strong-password
 SPENT_CORS_ORIGINS=["https://homelab.local"]
 SPENT_PUBLIC_BASE_URL=https://homelab.local/finance
 SPENT_PUBLIC_API_BASE_URL=https://homelab.local/finance/api
-SPENT_LOCAL_USERS=[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$260000$..."}]
+SPENT_LOCAL_USERS='[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$260000$..."}]'
 SPENT_SESSION_SECRET=replace-with-long-random-secret
 SPENT_SESSION_COOKIE_PATH=/finance
 SPENT_SESSION_COOKIE_SECURE=true
 SPENT_SESSION_COOKIE_SAMESITE=lax
 SPENT_FX_AUTO_UPDATE_ENABLED=true
 ```
+
+Keep `.env` values containing literal `$` single-quoted. Password hashes commonly contain `$`, and Docker Compose treats unquoted or double-quoted `$...` fragments as variable references.
 
 Deploy:
 
@@ -216,8 +218,8 @@ SPENT_COMPOSE_FILE=docker-compose.prod.yml SPENT_DB_SERVICE=spent-postgres bash 
 Restore on the Mini PC:
 
 ```bash
-CONFIRM_RESTORE=1 SPENT_USER_EMAIL_MAPPINGS="mauro@example.test=mauro@example.test" \
-  bash scripts/ubuntu/restore-spent-db.sh backups/spent_analyzer_YYYYMMDDTHHMMSSZ.dump
+CONFIRM_RESTORE=1 SPENT_USER_EMAIL_MAPPINGS="mauro@example.test=mauro@homelab.local,mica@example.test=mica@homelab.local" \
+  bash scripts/ubuntu/restore-spent-db.sh backups/spent_analyzer_20260708T164009Z.dump
 ```
 
 For local auth, keep the configured local user email equal to the existing restored user email when possible. If the configured email changes later, use `SPENT_USER_EMAIL_MAPPINGS=old@example.test=new@example.test` during restore.

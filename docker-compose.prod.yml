@@ -62,8 +62,10 @@ services:
       retries: 8
       start_period: 20s
     networks:
-      - default
-      - homelab_proxy
+      default:
+        aliases:
+          - api
+      homelab_proxy: {}
 
   spent-web:
     build:
