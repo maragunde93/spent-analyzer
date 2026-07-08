@@ -261,19 +261,18 @@ function sortExpenses(expenses: Expense[], sort: ExpenseSort, categories: Catego
   });
 }
 
-function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: string[]) {
-  return rows.slice(1).map((row, rowIndex) => {
-    const index = rowIndex + 1;
-    const previousRows = rows.slice(Math.max(0, index - 3), index);
+function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: string[], loadedPeriods: string[]) {
+  const rowsByPeriod = new Map(rows.map((row) => [String(row.period), row]));
+  return loadedPeriods.slice(1).map((period, periodIndex) => {
+    const index = periodIndex + 1;
+    const previousPeriods = loadedPeriods.slice(Math.max(0, index - 3), index);
+    const row = rowsByPeriod.get(period) ?? { period };
     return {
       period: String(row.period),
       values: keys.map((key) => {
         const current = Number(row[key] ?? 0);
-        const priorValues = previousRows
-          .map((previous) => Number(previous[key] ?? 0))
-          .filter((value) => value !== 0);
-        const prior = priorValues.length
-          ? priorValues.reduce((sum, value) => sum + value, 0) / priorValues.length
+        const prior = previousPeriods.length
+          ? previousPeriods.reduce((sum, priorPeriod) => sum + Number(rowsByPeriod.get(priorPeriod)?.[key] ?? 0), 0) / previousPeriods.length
           : 0;
         const percent = prior === 0 ? (current === 0 ? 0 : null) : ((current - prior) / Math.abs(prior)) * 100;
         return { key, current, prior, percent };
@@ -282,10 +281,10 @@ function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: s
   });
 }
 
-function averageForPeriods(rowsByPeriod: Map<string, Record<string, string | number>>, key: string, periods: string[]) {
+function averageForPeriods(rowsByPeriod: Map<string, Record<string, string | number>>, key: string, periods: string[], loadedPeriods: Set<string>) {
   const values = periods
-    .map((period) => Number(rowsByPeriod.get(period)?.[key] ?? 0))
-    .filter((value) => value !== 0);
+    .filter((period) => loadedPeriods.has(period))
+    .map((period) => Number(rowsByPeriod.get(period)?.[key] ?? 0));
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
 
@@ -293,18 +292,20 @@ function categoryAverageRows(
   rows: Array<Record<string, string | number>>,
   keys: string[],
   latestStatementPeriod: string | null,
+  loadedStatementPeriods: string[],
   annualReferenceYear: number
 ) {
   if (!latestStatementPeriod) return [];
   const rowsByPeriod = new Map(rows.map((row) => [String(row.period), row]));
+  const loadedPeriods = new Set(loadedStatementPeriods);
   const previousYearPeriods = monthPeriods(annualReferenceYear);
   return keys
     .map((key) => ({
       key,
       lastMonth: Number(rowsByPeriod.get(latestStatementPeriod)?.[key] ?? 0),
-      average3: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 3)),
-      average6: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 6)),
-      annualAverage: averageForPeriods(rowsByPeriod, key, previousYearPeriods)
+      average3: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 3), loadedPeriods),
+      average6: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 6), loadedPeriods),
+      annualAverage: averageForPeriods(rowsByPeriod, key, previousYearPeriods, loadedPeriods)
     }))
     .sort((a, b) => Math.max(b.lastMonth, b.average3, b.average6, b.annualAverage) - Math.max(a.lastMonth, a.average3, a.average6, a.annualAverage));
 }
@@ -794,12 +795,13 @@ function Dashboard({
   const rawCumulativeData = toChartRows(data?.cumulative_by_category ?? []);
   const cumulativeKeys = sortKeysByFinalAmount(rawCumulativeData, orderedKeysByFirstValue(rawCumulativeData, categories));
   const cumulativeData = netVisibleConsumptionRows(fillCumulativeRows(rawCumulativeData, periods, cumulativeKeys), cumulativeKeys);
-  const deltaRows = categoryDeltaRows(monthlyData, categoryKeys);
-  const deltaPeriods = deltaRows.map((row) => row.period);
   const cardStatementPeriods = [...(data?.card_statement_periods ?? [])].sort();
+  const currentYearStatementPeriods = cardStatementPeriods.filter((period) => period.startsWith(`${currentYear}-`));
+  const deltaRows = categoryDeltaRows(monthlyData, categoryKeys, currentYearStatementPeriods);
+  const deltaPeriods = deltaRows.map((row) => row.period);
   const latestCardStatementPeriod = cardStatementPeriods.length ? cardStatementPeriods[cardStatementPeriods.length - 1] : null;
   const annualAverageYear = currentYear - 1;
-  const averageRows = categoryAverageRows(rawMonthlyData, categoryKeys, latestCardStatementPeriod, annualAverageYear);
+  const averageRows = categoryAverageRows(rawMonthlyData, categoryKeys, latestCardStatementPeriod, cardStatementPeriods, annualAverageYear);
   const currentMonthRow = monthlyData.find((item) => item.period === currentMonth);
   const currentMonthKeys = sortKeysByPeriodAmount(monthlyData, currentMonth, categoryKeys, true);
   const chartData = currentMonthKeys.map((name) => ({ name, amount_ars: Number(currentMonthRow?.[name] ?? 0) }));
