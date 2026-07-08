@@ -252,13 +252,14 @@ function sortExpenses(expenses: Expense[], sort: ExpenseSort, categories: Catego
 }
 
 function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: string[]) {
-  return rows.map((row, index) => {
-    const previous = rows[index - 1];
+  return rows.slice(1).map((row, rowIndex) => {
+    const index = rowIndex + 1;
+    const previousRows = rows.slice(Math.max(0, index - 3), index);
     return {
       period: String(row.period),
       values: keys.map((key) => {
         const current = Number(row[key] ?? 0);
-        const prior = previous ? Number(previous[key] ?? 0) : 0;
+        const prior = previousRows.reduce((sum, previous) => sum + Number(previous[key] ?? 0), 0) / previousRows.length;
         const percent = prior === 0 ? (current === 0 ? 0 : null) : ((current - prior) / Math.abs(prior)) * 100;
         return { key, current, prior, percent };
       })
@@ -748,6 +749,7 @@ function Dashboard({
   const cumulativeKeys = sortKeysByFinalAmount(rawCumulativeData, orderedKeysByFirstValue(rawCumulativeData, categories));
   const cumulativeData = netVisibleConsumptionRows(fillCumulativeRows(rawCumulativeData, periods, cumulativeKeys), cumulativeKeys);
   const deltaRows = categoryDeltaRows(monthlyData, categoryKeys);
+  const deltaPeriods = deltaRows.map((row) => row.period);
   const currentMonthRow = monthlyData.find((item) => item.period === currentMonth);
   const currentMonthKeys = sortKeysByPeriodAmount(monthlyData, currentMonth, categoryKeys, true);
   const chartData = currentMonthKeys.map((name) => ({ name, amount_ars: Number(currentMonthRow?.[name] ?? 0) }));
@@ -1001,14 +1003,14 @@ function Dashboard({
             <thead>
               <tr>
                 <th>Categoria</th>
-                {periods.map((period) => <th key={period}>{axisMonthLabel(period)}</th>)}
+                {deltaPeriods.map((period) => <th key={period}>{axisMonthLabel(period)}</th>)}
               </tr>
             </thead>
             <tbody>
               {categoryKeys.map((key) => (
                 <tr key={key}>
                   <td>{key}</td>
-                  {periods.map((period) => {
+                  {deltaPeriods.map((period) => {
                     const value = deltaRows.find((row) => row.period === period)?.values.find((item) => item.key === key) ?? { percent: 0 };
                     return (
                     <td key={period}>
