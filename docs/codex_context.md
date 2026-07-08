@@ -1,6 +1,6 @@
 # Codex Context - Spent Analyzer
 
-Last updated: 2026-07-07
+Last updated: 2026-07-08
 
 Use this file as the compact handoff context for future Codex threads. Start new work by reading this file, then inspect only the files relevant to the requested task.
 
@@ -470,18 +470,18 @@ Flow:
 Dashboard focus is consumption over time.
 
 Current order:
-1. Consumo mes actual
-2. Filtros
-3. Consumo mensual current year
-4. Proyeccion recurrente
-5. Consumo acumulado current year
-6. Promedio mensual por categoria
-7. Variacion mensual por categoria
+1. Filtros
+2. Consumo mensual current year
+3. Proyeccion recurrente
+4. Consumo acumulado current year
+5. Promedio mensual por categoria
+6. Variacion mensual por categoria
 
 Dashboard filters:
 - household/all users or individual payer
 - category multi-select
 - category filter should affect all charts and metrics
+- filters occupy the full dashboard width; keep the height compact/adaptive to the number of categories
 
 Charts:
 - legends should use consistent category colors and order
@@ -494,6 +494,7 @@ Charts:
 - `Promedio mensual por categoria` uses the latest covered card statement period for the current dashboard filter. In household view, the latest period is the latest month common to all household members with loaded card summaries; when filtering a person, use that person's latest loaded period.
 - Average columns include only months whose card statement period is loaded/covered for the current dashboard filter. Within those covered months, category values of 0 are real data and must be included in the divisor. Example: latest 3 covered months May=0, April=350k, March=20k => average is 370k / 3.
 - The annual average uses the prior calendar year and only months from that year that are loaded/covered for the current dashboard filter, including zero category values for covered months.
+- `Promedio mensual por categoria` has sortable columns and defaults to `Promedio mensual (6 meses)` descending. Headers for the latest month and rolling averages are displayed on two lines, e.g. `Promedio mensual` / `(3 meses)` and `Ultimo mes` / `(2026-06 (Junio))`.
 - `Variacion mensual por categoria` compares each loaded month in the visible year against the average of up to the previous 3 loaded months in that same visible year. Zero category values in loaded months count in the average; unloaded months are excluded.
 
 Expenses page:

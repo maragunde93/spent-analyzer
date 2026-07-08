@@ -290,6 +290,15 @@ nav, .soon, .stack { display: flex; flex-direction: column; gap: 10px; }
   position: relative;
   z-index: 2;
 }
+.dashboard-filters.wide {
+  min-height: auto;
+}
+.dashboard-filters.wide .filter-summary-row {
+  grid-template-columns: minmax(160px, 240px);
+}
+.dashboard-filters.wide .filter-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
 .filter-summary-row {
   align-items: end;
   display: grid;
@@ -413,6 +422,10 @@ nav, .soon, .stack { display: flex; flex-direction: column; gap: 10px; }
   min-width: 860px;
   table-layout: fixed;
 }
+.average-table th {
+  vertical-align: bottom;
+  white-space: normal;
+}
 .average-table th:first-child,
 .average-table td:first-child {
   width: 28%;
@@ -420,6 +433,16 @@ nav, .soon, .stack { display: flex; flex-direction: column; gap: 10px; }
 .average-table th:not(:first-child),
 .average-table td:not(:first-child) {
   text-align: right;
+}
+.average-table th:not(:first-child) .sort-header {
+  margin-left: auto;
+  text-align: right;
+}
+.header-lines {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.25;
 }
 .category-cell {
   align-items: center;

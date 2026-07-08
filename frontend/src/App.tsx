@@ -109,14 +109,6 @@ function netVisibleConsumptionRows(rows: Array<Record<string, string | number>>,
   }) as Array<Record<string, string | number>>;
 }
 
-function sortKeysByPeriodAmount(rows: Array<Record<string, string | number>>, period: string, keys: string[], descending = true) {
-  const row = rows.find((item) => item.period === period);
-  return [...keys].sort((a, b) => {
-    const diff = Number(row?.[b] ?? 0) - Number(row?.[a] ?? 0);
-    return descending ? diff : -diff;
-  });
-}
-
 function sortKeysByFinalAmount(rows: Array<Record<string, string | number>>, keys: string[]) {
   const row = [...rows].reverse().find((item) => rowTotal(item, keys) !== 0);
   return [...keys].sort((a, b) => Number(row?.[b] ?? 0) - Number(row?.[a] ?? 0));
@@ -225,8 +217,15 @@ function formatCurrencyTotals(totals: Partial<Record<Currency, number>>) {
 
 type ExpenseSortKey = "date" | "description" | "paid_by" | "category" | "source" | "recurring" | "amount" | "notes";
 type ExpenseSort = { key: ExpenseSortKey; direction: "asc" | "desc" };
+type AverageSortKey = "category" | "lastMonth" | "average3" | "average6" | "annualAverage";
+type AverageSort = { key: AverageSortKey; direction: "asc" | "desc" };
 
 function sortIndicator(sort: ExpenseSort, key: ExpenseSortKey) {
+  if (sort.key !== key) return "";
+  return sort.direction === "asc" ? " ↑" : " ↓";
+}
+
+function averageSortIndicator(sort: AverageSort, key: AverageSortKey) {
   if (sort.key !== key) return "";
   return sort.direction === "asc" ? " ↑" : " ↓";
 }
@@ -306,8 +305,21 @@ function categoryAverageRows(
       average3: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 3), loadedPeriods),
       average6: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 6), loadedPeriods),
       annualAverage: averageForPeriods(rowsByPeriod, key, previousYearPeriods, loadedPeriods)
-    }))
-    .sort((a, b) => Math.max(b.lastMonth, b.average3, b.average6, b.annualAverage) - Math.max(a.lastMonth, a.average3, a.average6, a.annualAverage));
+    }));
+}
+
+type CategoryAverageRow = ReturnType<typeof categoryAverageRows>[number];
+
+function sortCategoryAverageRows(rows: CategoryAverageRow[], sort: AverageSort) {
+  return [...rows].sort((a, b) => {
+    const left = sort.key === "category" ? a.key : a[sort.key];
+    const right = sort.key === "category" ? b.key : b[sort.key];
+    const comparison = typeof left === "number" && typeof right === "number"
+      ? left - right
+      : String(left).localeCompare(String(right), "es-AR", { sensitivity: "base" });
+    if (comparison !== 0) return sort.direction === "asc" ? comparison : -comparison;
+    return a.key.localeCompare(b.key, "es-AR", { sensitivity: "base" });
+  });
 }
 
 function importSourceLabel(batch: Pick<ImportBatch, "source_type" | "filename">) {
@@ -783,8 +795,8 @@ function Dashboard({
   const [activeMonthlyCategory, setActiveMonthlyCategory] = useState<string | null>(null);
   const [activeLegendCategory, setActiveLegendCategory] = useState<string | null>(null);
   const [expandedRecurring, setExpandedRecurring] = useState<Record<string, boolean>>({});
+  const [averageSort, setAverageSort] = useState<AverageSort>({ key: "average6", direction: "desc" });
   const currentYear = new Date().getFullYear();
-  const currentMonth = new Date().toISOString().slice(0, 7);
   const periods = monthPeriods(currentYear);
   const rawMonthlyData = toChartRows(data?.monthly_by_category ?? []);
   const baseMonthlyKeys = Array.from(new Set([...categoryNames(categories), ...chartKeys(rawMonthlyData)]));
@@ -801,48 +813,20 @@ function Dashboard({
   const deltaPeriods = deltaRows.map((row) => row.period);
   const latestCardStatementPeriod = cardStatementPeriods.length ? cardStatementPeriods[cardStatementPeriods.length - 1] : null;
   const annualAverageYear = currentYear - 1;
-  const averageRows = categoryAverageRows(rawMonthlyData, categoryKeys, latestCardStatementPeriod, cardStatementPeriods, annualAverageYear);
-  const currentMonthRow = monthlyData.find((item) => item.period === currentMonth);
-  const currentMonthKeys = sortKeysByPeriodAmount(monthlyData, currentMonth, categoryKeys, true);
-  const chartData = currentMonthKeys.map((name) => ({ name, amount_ars: Number(currentMonthRow?.[name] ?? 0) }));
-  const currentMonthTotal = chartData.reduce((sum, item) => sum + item.amount_ars, 0);
+  const averageRows = sortCategoryAverageRows(
+    categoryAverageRows(rawMonthlyData, categoryKeys, latestCardStatementPeriod, cardStatementPeriods, annualAverageYear),
+    averageSort
+  );
   const allCategoryIds = categories.map((category) => Number(category.id));
   const noCategoriesSelected = categoryIds.includes(noDashboardCategoriesSelected);
   const activeChartCategory = activeLegendCategory ?? activeMonthlyCategory;
   const toggleLegendCategory = (name: string) => setActiveLegendCategory((current) => (current === name ? null : name));
+  const updateAverageSort = (key: AverageSortKey) => {
+    setAverageSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "category" ? "asc" : "desc" });
+  };
   return (
     <section className="grid dashboard-grid">
-      <div className="panel chart-panel">
-        <h2>Consumo mes actual</h2>
-        <div className="chart-total">{money(currentMonthTotal)}</div>
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={chartData} margin={{ left: 8, right: 24 }}>
-            <CartesianGrid stroke="#223047" vertical={false} />
-            <XAxis dataKey="name" interval={0} tick={{ fill: "#94a3b8", fontSize: 11 }} />
-            <YAxis tickFormatter={(value) => numberFormat(value)} tick={{ fill: "#94a3b8", fontSize: 12 }} />
-            <Tooltip
-              formatter={(value) => [money(Number(value)), "Consumo"]}
-              cursor={false}
-              contentStyle={{ background: "#0f172a", border: "1px solid #263449", color: "#e2e8f0" }}
-              itemStyle={{ color: "#e2e8f0" }}
-              labelStyle={{ color: "#e2e8f0" }}
-            />
-            <Bar dataKey="amount_ars" name="Consumo" radius={[4, 4, 0, 0]} isAnimationActive={false} activeBar={false}>
-              {chartData.map((item) => (
-                <Cell
-                  key={item.name}
-                  fill={categoryColor(item.name, categories, currentMonthKeys)}
-                  fillOpacity={categoryOpacity(activeChartCategory, item.name)}
-                  stroke={activeChartCategory === item.name ? "#f8fafc" : undefined}
-                  strokeWidth={activeChartCategory === item.name ? 2 : 0}
-                />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
-        <CategoryLegend categories={categories} names={legendKeys} active={activeChartCategory} onToggle={toggleLegendCategory} />
-      </div>
-      <div className="panel dashboard-filters">
+      <div className="panel dashboard-filters wide">
         <h2>Filtros</h2>
         <div className="filter-summary-row">
           <label>
@@ -1055,11 +1039,43 @@ function Dashboard({
             <table className="average-table">
               <thead>
                 <tr>
-                  <th>Categoria</th>
-                  <th>Ultimo mes ({axisMonthLabel(latestCardStatementPeriod)})</th>
-                  <th>Promedio 3 meses</th>
-                  <th>Promedio 6 meses</th>
-                  <th>Promedio {annualAverageYear}</th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("category")}>
+                      Categoria{averageSortIndicator(averageSort, "category")}
+                    </button>
+                  </th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("lastMonth")}>
+                      <span className="header-lines">
+                        <span>Ultimo mes</span>
+                        <span>({axisMonthLabel(latestCardStatementPeriod)}){averageSortIndicator(averageSort, "lastMonth")}</span>
+                      </span>
+                    </button>
+                  </th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("average3")}>
+                      <span className="header-lines">
+                        <span>Promedio mensual</span>
+                        <span>(3 meses){averageSortIndicator(averageSort, "average3")}</span>
+                      </span>
+                    </button>
+                  </th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("average6")}>
+                      <span className="header-lines">
+                        <span>Promedio mensual</span>
+                        <span>(6 meses){averageSortIndicator(averageSort, "average6")}</span>
+                      </span>
+                    </button>
+                  </th>
+                  <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("annualAverage")}>
+                      <span className="header-lines">
+                        <span>Promedio anual</span>
+                        <span>({annualAverageYear}){averageSortIndicator(averageSort, "annualAverage")}</span>
+                      </span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
