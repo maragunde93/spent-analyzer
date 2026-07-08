@@ -11,6 +11,7 @@ from app.domain import Currency, ExpenseSource
 from app.models import Category, Expense, FxRate, ImportBatch, ImportLine, Membership, RecurringRule, Subcategory, User
 from app.schemas import DashboardSummary
 from app.services.recurring import recurring_display_name, recurring_identity
+from app.services.statement_period import infer_card_statement_period, parse_card_due_date
 
 router = APIRouter(prefix="/households/{home_group_id}/dashboard", tags=["dashboard"])
 
@@ -224,7 +225,7 @@ def _recent_card_statement_scope(db: Session, home_group_id: int, limit: int = 2
     recent_batches = sorted(batches, key=_card_batch_sort_key, reverse=True)[:limit]
     batch_ids = [batch.id for batch in recent_batches]
     lines = list(db.scalars(select(ImportLine).where(ImportLine.import_batch_id.in_(batch_ids))))
-    return {line.id for line in lines}, {line.date.strftime("%Y-%m") for line in lines}
+    return {line.id for line in lines}, {_statement_period_for_batch(batch) for batch in recent_batches if _statement_period_for_batch(batch)}
 
 
 def _card_statement_periods(db: Session, home_group_id: int, paid_by_user_id: int | None = None) -> list[str]:
@@ -244,8 +245,7 @@ def _card_statement_periods(db: Session, home_group_id: int, paid_by_user_id: in
 
     periods_by_user: dict[int, set[str]] = {}
     for batch, line, payer_id in db.execute(stmt):
-        statement_period = _parse_statement_period(batch.period_label)
-        period = statement_period.strftime("%Y-%m") if statement_period else line.date.strftime("%Y-%m")
+        period = _statement_period_for_batch(batch) or line.date.strftime("%Y-%m")
         periods_by_user.setdefault(payer_id, set()).add(period)
 
     if paid_by_user_id:
@@ -262,10 +262,19 @@ def _card_statement_periods(db: Session, home_group_id: int, paid_by_user_id: in
 
 
 def _card_batch_sort_key(batch: ImportBatch) -> tuple[date, datetime, int]:
-    return (_parse_statement_period(batch.period_label) or date.min, batch.created_at or datetime.min, batch.id)
+    statement_period = _statement_period_for_batch(batch)
+    if statement_period:
+        year, month = [int(part) for part in statement_period.split("-")]
+        return (date(year, month, 1), batch.created_at or datetime.min, batch.id)
+    return (parse_card_due_date(batch.period_label) or date.min, batch.created_at or datetime.min, batch.id)
+
+
+def _statement_period_for_batch(batch: ImportBatch) -> str | None:
+    return batch.statement_period or infer_card_statement_period(batch.period_label)
 
 
 def _parse_statement_period(period_label: str | None) -> date | None:
+    return parse_card_due_date(period_label)
     if not period_label:
         return None
     match = re.search(r"(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})", period_label)

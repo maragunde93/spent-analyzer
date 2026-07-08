@@ -157,11 +157,16 @@ class ImportBatchRead(BaseModel):
     uploaded_by_user_id: int
     statement_account: str | None
     period_label: str | None
+    statement_period: str | None = None
     fx_rate_ars_per_usd: Decimal | None = None
     status: str
     created_at: str | None = None
     paid_by_user_ids: list[int] = []
     lines: list[ImportLineRead] = []
+
+
+class ImportBatchUpdate(BaseModel):
+    statement_period: str | None = None
 
 
 class ImportCommitRequest(BaseModel):

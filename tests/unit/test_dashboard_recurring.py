@@ -88,7 +88,7 @@ class DashboardRecurringTests(unittest.TestCase):
         self.assertIn("Crunchyroll", names)
 
     def test_card_statement_periods_use_household_common_or_filtered_user(self):
-        mauro_may_batch = self._card_batch("31-May-26")
+        mauro_may_batch = self._card_batch("13-Jun-26")
         mauro_may_line = self._card_line(mauro_may_batch, date(2026, 5, 18), "CRUNCHYROLL", Decimal("8000.00"))
         self._expense(
             date(2026, 5, 18),
@@ -101,7 +101,7 @@ class DashboardRecurringTests(unittest.TestCase):
             import_line_id=mauro_may_line.id,
             paid_by_user_id=self.user.id,
         )
-        mauro_june_batch = self._card_batch("30-Jun-26")
+        mauro_june_batch = self._card_batch("13-Jul-26")
         mauro_june_line = self._card_line(mauro_june_batch, date(2026, 6, 18), "CRUNCHYROLL", Decimal("9000.00"))
         self._expense(
             date(2026, 6, 18),
@@ -114,7 +114,7 @@ class DashboardRecurringTests(unittest.TestCase):
             import_line_id=mauro_june_line.id,
             paid_by_user_id=self.user.id,
         )
-        mica_may_batch = self._card_batch("31-May-26")
+        mica_may_batch = self._card_batch("13-Jun-26")
         mica_may_line = self._card_line(mica_may_batch, date(2026, 5, 20), "PEDIDOSYA", Decimal("12000.00"))
         self._expense(
             date(2026, 5, 20),

@@ -327,7 +327,11 @@ function buildImportCoverage(imports: ImportBatch[], users: User[]) {
       continue;
     }
     const source = importSourceLabel(batch);
-    const periods = new Set(batch.lines.length ? batch.lines.map((line) => line.date.slice(0, 7)) : batch.created_at ? [batch.created_at.slice(0, 7)] : []);
+    const periods = new Set(
+      batch.source_type === "bbva_account_xls"
+        ? batch.lines.length ? batch.lines.map((line) => line.date.slice(0, 7)) : batch.created_at ? [batch.created_at.slice(0, 7)] : []
+        : batch.statement_period ? [batch.statement_period] : batch.created_at ? [batch.created_at.slice(0, 7)] : []
+    );
     const isProcessed = batch.status === "committed" || batch.lines.some((line) => line.status === "committed" || line.status === "ignored");
     const paidByIds = batch.paid_by_user_ids.length ? batch.paid_by_user_ids : [null];
     for (const paidByUserId of paidByIds) {
@@ -1487,6 +1491,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
   const [reimbursementByLine, setReimbursementByLine] = useState<Record<number, boolean>>({});
   const [paidByByHolder, setPaidByByHolder] = useState<Record<string, string>>({});
   const [copiedHolder, setCopiedHolder] = useState<string | null>(null);
+  const [statementPeriod, setStatementPeriod] = useState("");
   const [paidByUserId, setPaidByUserId] = useState(String(users[0]?.id ?? 1));
   const queryClient = useQueryClient();
   const pendingImports = useQuery({ queryKey: ["imports", homeId, "parsed"], queryFn: () => api.imports(homeId, "parsed") });
@@ -1499,8 +1504,21 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
     setNotesByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.notes ?? ""])));
     setReimbursementByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.kind === "reimbursement"])));
     setPaidByByHolder(Object.fromEntries(Array.from(new Set(data.lines.map(cardholderKey))).map((holder) => [holder, userIdForCardholder(holder, users, String(users[0]?.id ?? 1))])));
+    setStatementPeriod(data.statement_period ?? "");
     setCopiedHolder(null);
   };
+  const updateBatch = useMutation({
+    mutationFn: ({ batchId, nextStatementPeriod }: { batchId: number; nextStatementPeriod: string }) =>
+      api.updateImportBatch(homeId, batchId, { statement_period: nextStatementPeriod || null }),
+    onSuccess: (data) => {
+      setBatch(data);
+      setStatementPeriod(data.statement_period ?? "");
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId, "parsed"] });
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId, "all"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
   const uploadCard = useMutation({
     mutationFn: (file: File) => api.uploadCardImport(homeId, file),
     onSuccess: (data) => {
@@ -1516,7 +1534,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
     }
   });
   const commit = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const rejected = (batch?.lines ?? [])
         .filter((line) => line.status === "pending" && !selected.includes(line.id) && !isIgnoredImportLine(line))
         .map((line) => line.id);
@@ -1525,6 +1543,9 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
           .filter((line) => selected.includes(line.id))
           .map((line) => [line.id, Number(paidByByHolder[cardholderKey(line)] ?? paidByUserId)])
       );
+      if (batch!.source_type !== "bbva_account_xls" && statementPeriod !== (batch!.statement_period ?? "")) {
+        await api.updateImportBatch(homeId, batch!.id, { statement_period: statementPeriod || null });
+      }
       return api.commitImport(homeId, batch!.id, selected, Number(paidByUserId), categoryByLine, subcategoryByLine, recurringByLine, notesByLine, reimbursementByLine, paidByOverrides, rejected);
     },
     onSuccess: () => {
@@ -1538,8 +1559,11 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
       setNotesByLine({});
       setReimbursementByLine({});
       setPaidByByHolder({});
+      setStatementPeriod("");
       setCopiedHolder(null);
       queryClient.invalidateQueries({ queryKey: ["imports", homeId, "parsed"] });
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId, "all"] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
     }
   });
   const deleteImport = useMutation({
@@ -1554,6 +1578,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
         setNotesByLine({});
         setReimbursementByLine({});
         setPaidByByHolder({});
+        setStatementPeriod("");
         setCopiedHolder(null);
       }
       queryClient.invalidateQueries({ queryKey: ["imports", homeId, "parsed"] });
@@ -1667,10 +1692,26 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
               </div>
             </div>
             <div className="toolbar compact">
+              {batch.source_type !== "bbva_account_xls" && (
+                <label className="statement-period-control">
+                  <span>Mes del resumen</span>
+                  <input
+                    type="month"
+                    value={statementPeriod}
+                    onChange={(event) => setStatementPeriod(event.target.value)}
+                    onBlur={() => {
+                      if (statementPeriod !== (batch.statement_period ?? "")) {
+                        updateBatch.mutate({ batchId: batch.id, nextStatementPeriod: statementPeriod });
+                      }
+                    }}
+                    aria-label="Mes del resumen de tarjeta"
+                  />
+                </label>
+              )}
               <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagador del resumen">
                 {users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
               </select>
-              <button className="primary" disabled={!selected.length || commit.isPending} onClick={() => commit.mutate()}>
+              <button className="primary" disabled={!selected.length || commit.isPending || updateBatch.isPending} onClick={() => commit.mutate()}>
                 Procesar {selected.length} lineas
               </button>
             </div>

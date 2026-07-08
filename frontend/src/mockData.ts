@@ -137,6 +137,7 @@ export const demoImport: ImportBatch = {
   uploaded_by_user_id: 1,
   statement_account: "0000000000",
   period_label: "28-May-26",
+  statement_period: "2026-05",
   fx_rate_ars_per_usd: "1500.0000",
   status: "parsed",
   created_at: "2026-07-03T12:00:00",

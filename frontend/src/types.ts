@@ -114,6 +114,7 @@ export type ImportBatch = {
   uploaded_by_user_id: number;
   statement_account: string | null;
   period_label: string | null;
+  statement_period: string | null;
   fx_rate_ars_per_usd: string | null;
   status: string;
   created_at: string | null;
