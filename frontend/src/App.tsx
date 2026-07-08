@@ -680,9 +680,9 @@ function LoginScreen() {
 
 function NavButton(props: { active: boolean; icon: ReactNode; label: string; onClick: () => void }) {
   return (
-    <button className={props.active ? "nav active" : "nav"} onClick={props.onClick}>
+    <button className={props.active ? "nav active" : "nav"} type="button" onClick={props.onClick}>
       {props.icon}
-      {props.label}
+      <span>{props.label}</span>
     </button>
   );
 }
@@ -1242,6 +1242,14 @@ function Expenses(props: {
     });
   }, [activeFilterKey, hasActiveFilters, periodKey]);
   const isMonthExpanded = (period: string) => expandedMonths[period] ?? period === currentMonth;
+  const allMonthsExpanded = periods.length > 0 && periods.every((period) => isMonthExpanded(period));
+  const setAllMonthsExpanded = (expanded: boolean) => {
+    setExpandedMonths((current) => {
+      const next = { ...current };
+      for (const period of periods) next[period] = expanded;
+      return next;
+    });
+  };
   const updateSort = (key: ExpenseSortKey) => {
     setSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "amount" || key === "date" ? "desc" : "asc" });
   };
@@ -1342,8 +1350,29 @@ function Expenses(props: {
                 <span>Total USD <strong>{money(visibleTotals.USD ?? 0, "USD")}</strong></span>
               </div>
             </div>
+            <button
+              className="primary month-bulk-toggle"
+              type="button"
+              disabled={!periods.length}
+              onClick={() => setAllMonthsExpanded(!allMonthsExpanded)}
+              aria-label={allMonthsExpanded ? "Colapsar todos los meses" : "Expandir todos los meses"}
+            >
+              {allMonthsExpanded ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              {allMonthsExpanded ? "Colapsar todos" : "Expandir todos"}
+            </button>
           </div>
-          <table>
+          <table className="expense-table">
+            <colgroup>
+              <col className="expense-date-col" />
+              <col className="expense-description-col" />
+              <col className="expense-paid-col" />
+              <col className="expense-category-col" />
+              <col className="expense-source-col" />
+              <col className="expense-recurring-col" />
+              <col className="expense-amount-col" />
+              <col className="expense-note-col" />
+              <col className="expense-actions-col" />
+            </colgroup>
             <thead>
               <tr>
                 <th><button className="sort-header" onClick={() => updateSort("date")}>Fecha{sortIndicator(sort, "date")}</button></th>
@@ -1388,9 +1417,9 @@ function Expenses(props: {
                         <Fragment key={expense.id}>
                           <tr className={!expense.category_id ? "needs-review-row" : undefined}>
                             <td>{expense.date}</td>
-                            <td>{expense.description}</td>
+                            <td className="description-cell">{expense.description}</td>
                             <td>{props.users.find((u) => u.id === expense.paid_by_user_id)?.display_name ?? "Usuario"}</td>
-                            <td>
+                            <td className="category-cell">
                               {isEditing ? (
                                 <div className="inline-edit-fields">
                                   <select
@@ -1443,7 +1472,7 @@ function Expenses(props: {
                                 money(expense.original_amount, expense.currency)
                               )}
                             </td>
-                            <td>
+                            <td className="note-cell">
                               {isEditing ? (
                                 <textarea className="note-edit" value={editNotes} onChange={(event) => setEditNotes(event.target.value.slice(0, 500))} aria-label={`Editar nota ${expense.description}`} maxLength={500} />
                               ) : hasNotes ? (
@@ -1454,7 +1483,7 @@ function Expenses(props: {
                                 <span className="muted">-</span>
                               )}
                             </td>
-                            <td>
+                            <td className="actions-cell">
                               {isEditing ? (
                                 <div className="row-actions">
                                   <button

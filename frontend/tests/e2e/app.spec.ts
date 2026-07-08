@@ -131,6 +131,13 @@ test("expense month groups can be collapsed while searching and after clearing s
   await page.getByPlaceholder("Buscar gasto").fill("Filtro colapso");
   await expect(page.getByText("Filtro colapso junio")).toBeVisible();
 
+  await page.getByRole("button", { name: /Colapsar todos/ }).click();
+  await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Expandir todos/ })).toBeVisible();
+
+  await page.getByRole("button", { name: /Expandir todos/ }).click();
+  await expect(page.getByText("Filtro colapso junio")).toBeVisible();
+
   await page.getByRole("button", { name: /Colapsar junio de 2026/i }).click();
   await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Expandir junio de 2026/i })).toBeVisible();
@@ -140,7 +147,8 @@ test("expense month groups can be collapsed while searching and after clearing s
 
   await page.getByRole("button", { name: /Expandir junio de 2026/i }).click();
   await expect(page.getByText("Filtro colapso junio")).toBeVisible();
-  await page.getByRole("button", { name: /Colapsar junio de 2026/i }).click();
+  await page.getByRole("button", { name: /Expandir todos/ }).click();
+  await page.getByRole("button", { name: /Colapsar todos/ }).click();
   await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
 });
 
