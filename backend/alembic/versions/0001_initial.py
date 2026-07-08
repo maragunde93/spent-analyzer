@@ -106,6 +106,7 @@ def upgrade() -> None:
         sa.Column("source_type", sa.String(length=80), nullable=False),
         sa.Column("statement_account", sa.String(length=80), nullable=True),
         sa.Column("period_label", sa.String(length=80), nullable=True),
+        sa.Column("fx_rate_ars_per_usd", sa.Numeric(14, 4), nullable=True),
         sa.Column("status", sa.String(length=40), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
     )

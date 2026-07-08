@@ -1,7 +1,7 @@
 import { categories, demoDashboard, demoExpenses, demoImport } from "./mockData";
 import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, HomeGroup, ImportBatch, ReceiptImport, Subcategory, User } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "/finance/api";
+const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "/api" : "/finance/api");
 const TEST_USER_EMAIL = import.meta.env.VITE_TEST_USER_EMAIL;
 export const apiFallbacksEnabled = import.meta.env.VITE_ENABLE_API_FALLBACKS === "true" || import.meta.env.DEV;
 const authHeaders: Record<string, string> = TEST_USER_EMAIL ? { "X-Test-User-Email": String(TEST_USER_EMAIL) } : {};
@@ -23,6 +23,15 @@ async function request<T>(path: string, init?: RequestInit, fallback?: T): Promi
 
 export const api = {
   me: () => request<User>("/auth/me"),
+  login: (payload: { username: string; password: string }) =>
+    request<User>(
+      "/auth/login",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }
+    ),
   loginUrl: () => `${API_BASE}/auth/login/google`,
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   households: () => request<HomeGroup[]>("/households", undefined, [{ id: 1, name: "Casa Adrogue" }]),

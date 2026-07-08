@@ -11,9 +11,10 @@ from sqlalchemy.orm import Session
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.api.auth import authenticate_google_user, logout
+from app.api.auth import LoginRequest, authenticate_google_user, login_local, logout
 from app.config import get_settings, validate_production_settings
 from app.database import Base
+from app.local_auth import hash_password
 from app.models import HomeGroup, Membership, User
 
 
@@ -24,6 +25,7 @@ class GoogleAuthTests(unittest.TestCase):
         os.environ["SPENT_GOOGLE_CLIENT_ID"] = "client-id"
         os.environ["SPENT_GOOGLE_CLIENT_SECRET"] = "client-secret"
         os.environ["SPENT_SESSION_SECRET"] = "test-secret"
+        os.environ["SPENT_LOCAL_USERS"] = "[]"
         get_settings.cache_clear()
         self.engine = create_engine("sqlite:///:memory:", future=True)
         Base.metadata.create_all(self.engine)
@@ -80,6 +82,39 @@ class GoogleAuthTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         self.assertEqual(request.session, {})
+
+    def test_local_login_maps_configured_user_to_existing_email(self):
+        password_hash = hash_password("local-password-123")
+        os.environ["SPENT_LOCAL_USERS"] = (
+            '[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro Local","password_hash":"'
+            + password_hash
+            + '"}]'
+        )
+        get_settings.cache_clear()
+        existing = User(email="mauro@example.test", display_name="Mauro")
+        self.db.add(existing)
+        self.db.commit()
+        request = SimpleNamespace(session={})
+
+        user = login_local(LoginRequest(username="MAURO", password="local-password-123"), request, self.db)
+
+        self.assertEqual(user.id, existing.id)
+        self.assertEqual(user.display_name, "Mauro Local")
+        self.assertEqual(request.session["user_id"], existing.id)
+
+    def test_local_login_rejects_bad_password(self):
+        password_hash = hash_password("local-password-123")
+        os.environ["SPENT_LOCAL_USERS"] = (
+            '[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"'
+            + password_hash
+            + '"}]'
+        )
+        get_settings.cache_clear()
+
+        with self.assertRaises(HTTPException) as raised:
+            login_local(LoginRequest(username="mauro", password="wrong-password"), SimpleNamespace(session={}), self.db)
+
+        self.assertEqual(raised.exception.status_code, 401)
 
     def test_production_rejects_test_auth(self):
         settings = get_settings()

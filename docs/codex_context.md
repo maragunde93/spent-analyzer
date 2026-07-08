@@ -8,7 +8,7 @@ Use this file as the compact handoff context for future Codex threads. Start new
 
 Spent Analyzer is a Spanish-first, dark-theme homelab finance app for household spending. The first release is bills/expenses-first, with manual expenses, BBVA card PDF import, BBVA account XLS import, receipt/ticket parsing, cash wallet tracking, dashboard analytics, recurring projections, categories/subcategories, and test auth for local use.
 
-The app is meant to run in a mini PC homelab behind an internal reverse proxy. Google auth is planned for production, but local/test auth remains available for development and Playwright.
+The app is meant to run in a mini PC homelab behind an internal reverse proxy. Production auth is local username/password over the homelab HTTPS proxy; test auth remains available only for development and Playwright.
 
 ## Architecture
 

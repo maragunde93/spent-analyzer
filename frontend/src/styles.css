@@ -32,6 +32,31 @@ button { cursor: pointer; }
   color: #94a3b8;
   margin: 0 0 22px;
 }
+.auth-panel label {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.auth-panel label span {
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 700;
+}
+.auth-panel input {
+  min-height: 42px;
+  border: 1px solid #263449;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0 12px;
+}
+.auth-panel .primary {
+  width: 100%;
+}
+.form-error {
+  color: #fca5a5 !important;
+  margin-top: -2px !important;
+}
 .primary-link {
   min-height: 42px;
   border: 1px solid #256b8d;
@@ -921,6 +946,17 @@ button.person-action-control:disabled {
   font-size: 12px;
   min-height: 24px;
   padding: 0 8px;
+}
+.import-coverage-cell {
+  align-items: flex-start;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 86px;
+}
+.import-coverage-cell small {
+  font-size: 11px;
+  white-space: nowrap;
 }
 .delta {
   display: inline-flex;

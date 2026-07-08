@@ -41,6 +41,9 @@ def ensure_incremental_schema() -> None:
                 connection.execute(text("ALTER TABLE expenses ADD COLUMN notes TEXT"))
             if "is_recurring" not in expense_columns:
                 connection.execute(text("ALTER TABLE expenses ADD COLUMN is_recurring BOOLEAN NOT NULL DEFAULT 0"))
+            import_batch_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(import_batches)"))}
+            if "fx_rate_ars_per_usd" not in import_batch_columns:
+                connection.execute(text("ALTER TABLE import_batches ADD COLUMN fx_rate_ars_per_usd NUMERIC(14, 4)"))
             import_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(import_lines)"))}
             if "suggested_subcategory_id" not in import_columns:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
@@ -65,12 +68,14 @@ def ensure_incremental_schema() -> None:
                 connection.execute(text("ALTER TABLE merchants ADD COLUMN subcategory_id INTEGER REFERENCES subcategories(id)"))
             if "is_recurring" not in merchant_columns:
                 connection.execute(text("ALTER TABLE merchants ADD COLUMN is_recurring BOOLEAN NOT NULL DEFAULT 0"))
+            _backfill_import_batch_fx_rates(connection)
             _repair_bank_import_signs(connection)
     elif engine.dialect.name == "postgresql":
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS notes TEXT"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS fx_rate_ars_per_usd NUMERIC(14, 4)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS notes TEXT"))
@@ -81,7 +86,30 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("ALTER TABLE receipt_items ADD COLUMN IF NOT EXISTS suggested_subcategory_name VARCHAR(80)"))
             connection.execute(text("ALTER TABLE merchants ADD COLUMN IF NOT EXISTS subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE merchants ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
+            _backfill_import_batch_fx_rates(connection)
             _repair_bank_import_signs(connection)
+
+
+def _backfill_import_batch_fx_rates(connection) -> None:
+    connection.execute(
+        text(
+            """
+            UPDATE import_batches
+            SET fx_rate_ars_per_usd = COALESCE(
+                (
+                    SELECT rate
+                    FROM fx_rates
+                    WHERE from_currency = 'USD'
+                      AND to_currency = 'ARS'
+                    ORDER BY date DESC, id DESC
+                    LIMIT 1
+                ),
+                1500.0000
+            )
+            WHERE fx_rate_ars_per_usd IS NULL
+            """
+        )
+    )
 
 
 def _repair_bank_import_signs(connection) -> None:

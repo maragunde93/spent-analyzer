@@ -4,12 +4,14 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.config import get_settings
 from app.database import get_db
+from app.local_auth import verify_password
 from app.models import User
 from app.schemas import UserRead
 
@@ -20,8 +22,33 @@ GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 GOOGLE_SCOPES = "openid email profile"
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 @router.get("/me", response_model=UserRead)
 def me(user: User = Depends(get_current_user)) -> User:
+    return user
+
+
+@router.post("/login", response_model=UserRead)
+def login_local(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> User:
+    username = payload.username.strip().lower()
+    configured_user = next((item for item in get_settings().local_users if item.username.lower() == username), None)
+    if configured_user is None or not verify_password(payload.password, configured_user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+
+    email = configured_user.email.strip().lower()
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None:
+        user = User(email=email, display_name=configured_user.display_name.strip()[:120])
+        db.add(user)
+    else:
+        user.display_name = configured_user.display_name.strip()[:120] or user.display_name
+    db.commit()
+    db.refresh(user)
+    request.session["user_id"] = user.id
     return user
 
 

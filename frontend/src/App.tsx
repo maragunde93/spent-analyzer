@@ -272,22 +272,32 @@ function importSourceLabel(batch: Pick<ImportBatch, "source_type" | "filename">)
   return "Statement tarjeta visa";
 }
 
+type ImportCoverageCell = { status: "Pendiente" | "Procesado"; fxRate: string | null };
+
 function buildImportCoverage(imports: ImportBatch[], users: User[]) {
-  const rows = new Map<string, { source: string; uploadedByUserId: number; paidByUserId: number | null; months: Record<string, "Pendiente" | "Procesado"> }>();
+  const rows = new Map<string, { key: string; source: string; uploadedByUserId: number; paidByUserId: number | null; months: Record<string, ImportCoverageCell> }>();
   const years = new Set<number>();
-  for (const batch of imports) {
+  const orderedImports = [...imports].sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? "") || a.id - b.id);
+  for (const batch of orderedImports) {
+    if (batch.lines.length && batch.lines.every((line) => line.duplicate_status === "already_committed" || line.status === "duplicate")) {
+      continue;
+    }
     const source = importSourceLabel(batch);
     const periods = new Set(batch.lines.length ? batch.lines.map((line) => line.date.slice(0, 7)) : batch.created_at ? [batch.created_at.slice(0, 7)] : []);
     const isProcessed = batch.status === "committed" || batch.lines.some((line) => line.status === "committed" || line.status === "ignored");
     const paidByIds = batch.paid_by_user_ids.length ? batch.paid_by_user_ids : [null];
     for (const paidByUserId of paidByIds) {
-      const key = `${source}:${batch.uploaded_by_user_id}:${paidByUserId ?? "pending"}`;
-      if (!rows.has(key)) rows.set(key, { source, uploadedByUserId: batch.uploaded_by_user_id, paidByUserId, months: {} });
+      const key = `${source}:${batch.statement_account ?? ""}:${paidByUserId ?? "pending"}`;
+      if (!rows.has(key)) rows.set(key, { key, source, uploadedByUserId: batch.uploaded_by_user_id, paidByUserId, months: {} });
       const row = rows.get(key)!;
       for (const period of periods) {
         const year = Number(period.slice(0, 4));
         if (year) years.add(year);
-        row.months[period] = row.months[period] === "Procesado" || isProcessed ? "Procesado" : "Pendiente";
+        const status = isProcessed ? "Procesado" : "Pendiente";
+        const current = row.months[period];
+        if (!current || (current.status === "Pendiente" && status === "Procesado")) {
+          row.months[period] = { status, fxRate: batch.fx_rate_ars_per_usd };
+        }
       }
     }
   }
@@ -569,14 +579,36 @@ function LoadingScreen() {
 }
 
 function LoginScreen() {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const login = useMutation({
+    mutationFn: api.login,
+    onSuccess: () => window.location.assign(import.meta.env.BASE_URL || "/")
+  });
+
   return (
     <main className="auth-screen">
-      <section className="auth-panel">
+      <form
+        className="auth-panel"
+        onSubmit={(event) => {
+          event.preventDefault();
+          login.mutate({ username, password });
+        }}
+      >
         <div className="brand-mark"><Home size={20} /></div>
         <h1>Finance</h1>
-        <p>Ingresa con una cuenta autorizada para ver los consumos del hogar.</p>
-        <a className="primary-link" href={api.loginUrl()}>Ingresar con Google</a>
-      </section>
+        <p>Ingresa con tu usuario local para ver los consumos del hogar.</p>
+        <label>
+          <span>Usuario</span>
+          <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required />
+        </label>
+        <label>
+          <span>Contrasena</span>
+          <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required />
+        </label>
+        {login.isError && <p className="form-error">Usuario o contrasena incorrectos.</p>}
+        <button className="primary" type="submit" disabled={login.isPending}>Ingresar</button>
+      </form>
     </main>
   );
 }
@@ -1800,7 +1832,7 @@ function HistoryPanel({ users, homeId }: { users: User[]; homeId: number }) {
                 </thead>
                 <tbody>
                   {importSummary.rows.map((row) => (
-                    <tr key={`${row.source}-${row.uploadedByUserId}-${row.paidByUserId ?? "pending"}`}>
+                    <tr key={row.key}>
                       <td>{row.source}</td>
                       <td>{users.find((user) => user.id === row.uploadedByUserId)?.display_name ?? "Usuario"}</td>
                       <td>{row.paidByUserId ? users.find((user) => user.id === row.paidByUserId)?.display_name ?? "Usuario" : "Sin procesar"}</td>
@@ -1809,7 +1841,12 @@ function HistoryPanel({ users, homeId }: { users: User[]; homeId: number }) {
                         const value = row.months[period];
                         return (
                           <td key={period}>
-                            {value ? <span className={value === "Procesado" ? "status" : "status warning-status"}>{value}</span> : <span className="muted">-</span>}
+                            {value ? (
+                              <div className="import-coverage-cell">
+                                <span className={value.status === "Procesado" ? "status" : "status warning-status"}>{value.status}</span>
+                                {value.fxRate ? <small className="muted">Blue {money(value.fxRate, "ARS")}</small> : null}
+                              </div>
+                            ) : <span className="muted">-</span>}
                           </td>
                         );
                       })}

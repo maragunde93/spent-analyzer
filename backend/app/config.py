@@ -1,5 +1,13 @@
 from functools import lru_cache
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class LocalAuthUser(BaseModel):
+    username: str
+    email: str
+    display_name: str
+    password_hash: str
 
 
 class Settings(BaseSettings):
@@ -13,6 +21,7 @@ class Settings(BaseSettings):
     google_client_id: str | None = None
     google_client_secret: str | None = None
     allowed_google_emails: list[str] = []
+    local_users: list[LocalAuthUser] = []
     session_secret: str = "change-me"
     session_cookie_name: str = "spent_session"
     session_cookie_path: str = "/"
@@ -41,7 +50,7 @@ def validate_production_settings(settings: Settings) -> None:
         raise RuntimeError("SPENT_TEST_AUTH_ENABLED must be false when SPENT_ENVIRONMENT=production")
     if settings.session_secret in {"change-me", "replace-this-for-homelab", ""}:
         raise RuntimeError("SPENT_SESSION_SECRET must be set to a strong non-default value in production")
-    if not settings.google_client_id or not settings.google_client_secret:
-        raise RuntimeError("Google OAuth client id and secret are required in production")
-    if not settings.allowed_google_emails:
-        raise RuntimeError("SPENT_ALLOWED_GOOGLE_EMAILS must allow at least one account in production")
+    has_google_auth = bool(settings.google_client_id and settings.google_client_secret and settings.allowed_google_emails)
+    has_local_auth = bool(settings.local_users)
+    if not has_google_auth and not has_local_auth:
+        raise RuntimeError("Configure either SPENT_LOCAL_USERS or Google OAuth settings in production")

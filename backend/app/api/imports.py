@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -8,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_home_member
 from app.database import get_db
-from app.domain import ExpenseSource, ImportLineKind
-from app.models import CashWalletEntry, Category, Earning, Expense, ImportBatch, ImportLine, Subcategory, User
+from app.domain import Currency, ExpenseSource, ImportLineKind
+from app.models import CashWalletEntry, Category, Earning, Expense, FxRate, ImportBatch, ImportLine, Subcategory, User
 from app.schemas import ImportBatchRead, ImportCommitRequest
 from app.services.accounting import amount_to_ars
 from app.services.audit import log_action
@@ -61,6 +62,7 @@ async def upload_bbva_visa(
     )
     db.add(batch)
     db.flush()
+    batch.fx_rate_ars_per_usd = _fx_rate_for_import_date(db, batch.created_at.date() if batch.created_at else date.today())
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
     for line in parsed.lines:
@@ -121,6 +123,7 @@ async def upload_bbva_account(
     )
     db.add(batch)
     db.flush()
+    batch.fx_rate_ars_per_usd = _fx_rate_for_import_date(db, batch.created_at.date() if batch.created_at else date.today())
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
     for line in parsed.lines:
@@ -217,6 +220,8 @@ def commit_import(
         )
     )
     offset_recurring_line_ids = _reintegrated_recurring_line_ids(db, batch, lines, payload)
+    if batch and batch.fx_rate_ars_per_usd is None:
+        batch.fx_rate_ars_per_usd = _fx_rate_for_import_date(db, batch.created_at.date() if batch.created_at else date.today())
     created = 0
     processed = 0
     for line in lines:
@@ -231,7 +236,7 @@ def commit_import(
         is_reimbursement = payload.reimbursement_overrides.get(line.id, False) or line.kind == ImportLineKind.reimbursement
         line.notes = payload.note_overrides.get(line.id, line.notes)
         conversion_date = batch.created_at.date() if batch else line.date
-        amount_ars = amount_to_ars(db, Decimal(line.original_amount), line.currency, conversion_date)
+        amount_ars = _import_amount_to_ars(db, Decimal(line.original_amount), line.currency, conversion_date, batch)
         if batch and batch.source_type == "bbva_account_xls" and _is_bank_financial_movement(line):
             line.status = "ignored"
             processed += 1
@@ -363,6 +368,7 @@ def _read_batch(db: Session, batch_id: int) -> ImportBatchRead:
         uploaded_by_user_id=batch.uploaded_by_user_id,
         statement_account=batch.statement_account,
         period_label=batch.period_label,
+        fx_rate_ars_per_usd=batch.fx_rate_ars_per_usd,
         status=batch.status,
         created_at=batch.created_at.isoformat() if batch.created_at else None,
         paid_by_user_ids=_paid_by_user_ids_for_lines(db, [line.id for line in lines]),
@@ -382,6 +388,33 @@ def _paid_by_user_ids_for_lines(db: Session, line_ids: list[int]) -> list[int]:
             )
         )
     )
+
+
+def _import_amount_to_ars(db: Session, amount: Decimal, currency: Currency, conversion_date: date, batch: ImportBatch | None) -> Decimal:
+    if currency == Currency.ARS:
+        return amount
+    if batch and batch.fx_rate_ars_per_usd is not None:
+        return (amount * Decimal(batch.fx_rate_ars_per_usd)).quantize(Decimal("0.01"))
+    return amount_to_ars(db, amount, currency, conversion_date)
+
+
+def _fx_rate_for_import_date(db: Session, rate_date: date) -> Decimal:
+    rate = db.scalar(
+        select(FxRate.rate)
+        .where(
+            FxRate.date <= rate_date,
+            FxRate.from_currency == Currency.USD,
+            FxRate.to_currency == Currency.ARS,
+        )
+        .order_by(FxRate.date.desc(), FxRate.id.desc())
+    )
+    if rate is None:
+        rate = db.scalar(
+            select(FxRate.rate)
+            .where(FxRate.from_currency == Currency.USD, FxRate.to_currency == Currency.ARS)
+            .order_by(FxRate.date.desc(), FxRate.id.desc())
+        )
+    return Decimal(rate) if rate is not None else Decimal("1500.0000")
 
 
 def _fill_missing_suggestion(db: Session, line: ImportLine) -> None:

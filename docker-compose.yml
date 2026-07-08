@@ -20,9 +20,17 @@ services:
     build:
       context: ./backend
     environment:
+      SPENT_ENVIRONMENT: development
       SPENT_DATABASE_URL: postgresql+psycopg://spent:spent_dev_password@postgres:5432/spent_analyzer
       SPENT_CORS_ORIGINS: '["http://localhost:5173","http://localhost:8080"]'
-      SPENT_TEST_AUTH_ENABLED: "true"
+      SPENT_TEST_AUTH_ENABLED: "false"
+      SPENT_PUBLIC_BASE_URL: http://localhost:8080/finance
+      SPENT_PUBLIC_API_BASE_URL: http://localhost:8080/finance/api
+      SPENT_LOCAL_USERS: '[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$$260000$$2pVSTv4HbgAOKvbaAGMnGQ==$$feqKyBaYhvwm-SEKvl5n88HuYFZ9HgZcecC0BANnIzM="}]'
+      SPENT_SESSION_SECRET: local-dev-session-secret-change-for-shared-hosts
+      SPENT_SESSION_COOKIE_PATH: /finance
+      SPENT_SESSION_COOKIE_SECURE: "false"
+      SPENT_SESSION_COOKIE_SAMESITE: lax
       SPENT_SEED_DEMO_DATA: "false"
       SPENT_GEMINI_API_KEY: ${SPENT_GEMINI_API_KEY:-}
       SPENT_GEMINI_MODEL: ${SPENT_GEMINI_MODEL:-gemini-3.5-flash}
@@ -38,8 +46,10 @@ services:
   web:
     build:
       context: ./frontend
-    environment:
-      VITE_API_BASE: /api
+      args:
+        VITE_APP_BASE: /finance/
+        VITE_API_BASE: /finance/api
+        VITE_ENABLE_API_FALLBACKS: "false"
     depends_on:
       - api
     ports:

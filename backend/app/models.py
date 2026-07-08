@@ -128,6 +128,7 @@ class ImportBatch(Base):
     source_type: Mapped[str] = mapped_column(String(80), default="bbva_visa_pdf")
     statement_account: Mapped[str | None] = mapped_column(String(80), nullable=True)
     period_label: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    fx_rate_ars_per_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="parsed")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

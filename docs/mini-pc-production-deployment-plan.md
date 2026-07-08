@@ -13,36 +13,79 @@ This guide tracks the production deployment work for Spent Analyzer on the `home
 
 The alerting system remains the priority workload. Production compose does not publish Spent Analyzer ports to the host; nginx reaches the app through Docker's `homelab_proxy` network.
 
-## HTTPS And Google OAuth
+## HTTPS And Local Auth
 
-Google OAuth is implemented inside Spent Analyzer only. It is not proxy-wide auth for `/admin/`, `/frigate/`, or `/portainer/`.
+Spent Analyzer uses app-scoped local username/password authentication. The homelab nginx proxy should serve all apps over HTTPS using a local CA certificate.
 
-Preferred no-cost HTTPS path:
+Recommended local certificate model:
 
-1. Use a real domain you own, such as `homelab.example.com`.
-2. Create a private LAN DNS record pointing that name to the Mini PC IP, currently `192.168.1.71`.
-3. Issue a free Let's Encrypt certificate using DNS-01 validation. DNS-01 proves domain control with a TXT record and does not require exposing the Mini PC to the internet.
-4. Configure Google OAuth redirect URI exactly as:
+1. Create a private local CA on the Mini PC.
+2. Use that CA to sign a server certificate for `homelab.local`, `homelab`, and `192.168.1.71`.
+3. Mount the server certificate into nginx.
+4. Install the local CA certificate on trusted laptops/phones so browsers trust `https://homelab.local`.
 
-```text
-https://homelab.example.com/finance/api/auth/google/callback
+Create the local CA and server certificate on the Mini PC:
+
+```bash
+cd ~/repos/alerting-system
+mkdir -p nginx/certs
+chmod 700 nginx/certs
+
+openssl genrsa -out nginx/certs/homelab-local-ca.key 4096
+openssl req -x509 -new -nodes \
+  -key nginx/certs/homelab-local-ca.key \
+  -sha256 -days 3650 \
+  -out nginx/certs/homelab-local-ca.crt \
+  -subj "/CN=Homelab Local CA"
+
+openssl genrsa -out nginx/certs/homelab.local.key 2048
+openssl req -new \
+  -key nginx/certs/homelab.local.key \
+  -out nginx/certs/homelab.local.csr \
+  -subj "/CN=homelab.local"
+
+cat > nginx/certs/homelab.local.ext <<'EOF'
+subjectAltName=DNS:homelab.local,DNS:homelab,IP:192.168.1.71
+extendedKeyUsage=serverAuth
+EOF
+
+openssl x509 -req \
+  -in nginx/certs/homelab.local.csr \
+  -CA nginx/certs/homelab-local-ca.crt \
+  -CAkey nginx/certs/homelab-local-ca.key \
+  -CAcreateserial \
+  -out nginx/certs/homelab.local.crt \
+  -days 825 -sha256 \
+  -extfile nginx/certs/homelab.local.ext
+
+chmod 600 nginx/certs/*.key
 ```
 
-5. Mount the certificate and key into the homelab nginx proxy and add a `443` listener.
+Install the CA certificate, not the server key, on client devices:
 
-Alternatives:
+- Windows: import `nginx/certs/homelab-local-ca.crt` into `Trusted Root Certification Authorities`.
+- macOS: import into Keychain Access > System, then set trust to Always Trust.
+- iOS: install the profile, then enable full trust in certificate trust settings.
+- Android: install as a user CA certificate; Chrome should trust it for user-installed roots on normal browser traffic.
 
-- HTTP-01 with Let's Encrypt is simpler but requires public port `80` to reach the Mini PC.
-- Caddy local CA or `mkcert` can produce trusted local certificates on devices where the local CA is installed, but this is awkward for phones and not the recommended Google OAuth route.
-- A Tailscale `.ts.net` HTTPS hostname may be viable if Tailscale becomes the accepted access layer.
+After creating the certs, deploy/recreate the alerting proxy:
 
-References:
+```bash
+cd ~/repos/alerting-system
+bash scripts/ubuntu/deploy-alerting.sh
+```
 
-- Google OAuth redirect rules: `https://developers.google.com/identity/protocols/oauth2/web-server`
-- Let's Encrypt challenges: `https://letsencrypt.org/docs/challenge-types/`
-- Let's Encrypt FAQ: `https://letsencrypt.org/docs/faq/`
-- Caddy local HTTPS: `https://caddyserver.com/docs/automatic-https`
-- mkcert: `https://github.com/FiloSottile/mkcert`
+Verify:
+
+```bash
+curl -kI https://homelab.local/
+curl -kI https://homelab.local/admin/
+curl -kI https://homelab.local/frigate/
+curl -kI https://homelab.local/finance/
+docker logs homelab_proxy --tail 100
+```
+
+Use `-k` only for command-line smoke tests before the CA is installed on the client. Browsers should show a trusted lock after installing the CA.
 
 ## Deployment
 
@@ -52,12 +95,10 @@ Create `.env` on the Mini PC from `.env.example` and set production values:
 SPENT_POSTGRES_DB=spent_analyzer
 SPENT_POSTGRES_USER=spent
 SPENT_POSTGRES_PASSWORD=replace-with-strong-password
-SPENT_CORS_ORIGINS=["https://homelab.example.com"]
-SPENT_PUBLIC_BASE_URL=https://homelab.example.com/finance
-SPENT_PUBLIC_API_BASE_URL=https://homelab.example.com/finance/api
-SPENT_GOOGLE_CLIENT_ID=your-google-client-id
-SPENT_GOOGLE_CLIENT_SECRET=your-google-client-secret
-SPENT_ALLOWED_GOOGLE_EMAILS=["your-google-account@gmail.com"]
+SPENT_CORS_ORIGINS=["https://homelab.local"]
+SPENT_PUBLIC_BASE_URL=https://homelab.local/finance
+SPENT_PUBLIC_API_BASE_URL=https://homelab.local/finance/api
+SPENT_LOCAL_USERS=[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$260000$..."}]
 SPENT_SESSION_SECRET=replace-with-long-random-secret
 SPENT_SESSION_COOKIE_PATH=/finance
 SPENT_SESSION_COOKIE_SECURE=true
@@ -74,12 +115,56 @@ bash scripts/ubuntu/deploy-spent-analyzer.sh
 
 The deploy script validates compose config, prints resource information, creates `homelab_proxy` if missing, builds containers, and smoke-tests API health.
 
+## Local Docker End-To-End Check
+
+The local Docker compose stack mirrors the production subpath and local-auth flow without requiring local TLS:
+
+```bash
+docker compose up -d --build
+```
+
+Open:
+
+```text
+http://localhost:8080/finance/
+```
+
+Default local credentials:
+
+```text
+usuario: mauro
+contrasena: local-password-123
+```
+
+Useful smoke checks:
+
+```bash
+curl http://localhost:8080/finance/api/health
+curl -i -X POST http://localhost:8080/finance/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"mauro","password":"local-password-123"}'
+```
+
 ## NGINX Proxy Changes
 
 The current nginx config lives in the `alerting-system` project. Add these routes to `nginx/conf.d/default.conf`:
 
 ```nginx
-client_max_body_size 25m;
+server {
+    listen 80;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name _;
+    resolver 127.0.0.11 valid=30s ipv6=off;
+    client_max_body_size 25m;
+
+    ssl_certificate /etc/nginx/certs/homelab.local.crt;
+    ssl_certificate_key /etc/nginx/certs/homelab.local.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
 
 location = /finance {
     return 302 /finance/;
@@ -107,9 +192,10 @@ location /finance/ {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 }
+}
 ```
 
-Also add a homepage card pointing to `/finance/`.
+Also add a homepage card pointing to `/finance/`, expose `443:443`, and mount `nginx/certs` into the proxy container as `/etc/nginx/certs:ro`.
 
 Longer term, move `compose/proxy.compose.yml`, `nginx/conf.d`, `nginx/html`, and certificate automation into a standalone `homelab-platform` repo. That should happen when TLS/cert renewal becomes shared infrastructure.
 
@@ -130,11 +216,11 @@ SPENT_COMPOSE_FILE=docker-compose.prod.yml SPENT_DB_SERVICE=spent-postgres bash 
 Restore on the Mini PC:
 
 ```bash
-CONFIRM_RESTORE=1 SPENT_USER_EMAIL_MAPPINGS="mauro@example.test=your-google-account@gmail.com" \
+CONFIRM_RESTORE=1 SPENT_USER_EMAIL_MAPPINGS="mauro@example.test=mauro@example.test" \
   bash scripts/ubuntu/restore-spent-db.sh backups/spent_analyzer_YYYYMMDDTHHMMSSZ.dump
 ```
 
-The email mapping preserves the existing MAURO user row, memberships, expenses, imports, and audit ownership while changing the login email to the Google account.
+For local auth, keep the configured local user email equal to the existing restored user email when possible. If the configured email changes later, use `SPENT_USER_EMAIL_MAPPINGS=old@example.test=new@example.test` during restore.
 
 ## Resource And Storage Sizing
 
@@ -160,10 +246,16 @@ The three-year relational dataset should stay well below 250 MB unless receipt i
 - `SPENT_ENVIRONMENT=production`.
 - `SPENT_TEST_AUTH_ENABLED=false`.
 - Strong `SPENT_SESSION_SECRET`.
-- Google OAuth client configured with the exact HTTPS callback URL.
-- `SPENT_ALLOWED_GOOGLE_EMAILS` includes only approved accounts.
+- `SPENT_LOCAL_USERS` contains only approved local accounts and PBKDF2 password hashes.
+- Local CA certificate is installed on trusted client devices.
+- nginx certificate files exist before starting `homelab_proxy`.
 - `.env` stays uncommitted.
 - `docker-compose.prod.yml` validates on the Mini PC.
 - Alerting nginx routes `/finance/` and `/finance/api/`.
-- Backup dump restored and MAURO email mapping applied before first Google login.
+- Backup dump restored and MAURO local auth email matches the restored MAURO user row.
 - `docker stats` confirms alerting containers remain healthy after deploy.
+Generate a local password hash before filling `SPENT_LOCAL_USERS`:
+
+```bash
+python3 scripts/hash-local-password.py
+```
