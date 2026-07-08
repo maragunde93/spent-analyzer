@@ -99,8 +99,19 @@ button.user-chip { cursor: pointer; }
   padding: 22px;
 }
 
-.brand { display: flex; gap: 12px; align-items: center; }
+.brand {
+  display: flex;
+  gap: 0;
+  align-items: center;
+  justify-content: center;
+}
+.app-shell:has(.sidebar:hover) .brand,
+.app-shell:has(.sidebar:focus-within) .brand {
+  gap: 12px;
+  justify-content: flex-start;
+}
 .brand-mark {
+  flex: 0 0 42px;
   width: 42px;
   height: 42px;
   border-radius: 8px;
@@ -114,9 +125,12 @@ button.user-chip { cursor: pointer; }
 .brand > div:last-child,
 .nav span,
 .soon {
+  max-width: 0;
   opacity: 0;
+  overflow: hidden;
   pointer-events: none;
   transition: opacity .12s ease;
+  white-space: nowrap;
 }
 
 .app-shell:has(.sidebar:hover) .brand > div:last-child,
@@ -125,12 +139,14 @@ button.user-chip { cursor: pointer; }
 .app-shell:has(.sidebar:focus-within) .nav span,
 .app-shell:has(.sidebar:hover) .soon,
 .app-shell:has(.sidebar:focus-within) .soon {
+  max-width: 100%;
   opacity: 1;
   pointer-events: auto;
 }
 
 nav, .soon, .stack { display: flex; flex-direction: column; gap: 10px; }
 .nav, .soon button {
+  flex: 0 0 auto;
   min-height: 42px;
   border: 0;
   border-radius: 8px;
@@ -138,12 +154,29 @@ nav, .soon, .stack { display: flex; flex-direction: column; gap: 10px; }
   color: #cbd5e1;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
-  padding: 0 12px;
+  padding: 0;
   text-align: left;
   white-space: nowrap;
+  width: 42px;
 }
-.nav svg, .soon svg { width: 18px; height: 18px; }
+.app-shell:has(.sidebar:hover) .nav,
+.app-shell:has(.sidebar:focus-within) .nav,
+.soon button {
+  justify-content: flex-start;
+  padding: 0 12px;
+  width: 100%;
+}
+.app-shell:has(.sidebar:hover) .nav span,
+.app-shell:has(.sidebar:focus-within) .nav span {
+  max-width: 190px;
+}
+.nav svg, .soon svg {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
 .nav.active, .nav:hover, .soon button:hover { background: #132033; color: #f8fafc; }
 .soon { margin-top: auto; border-top: 1px solid #1e293b; padding-top: 16px; }
 .soon span { color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
@@ -1286,8 +1319,18 @@ button.person-action-control:disabled {
   .brand > div:last-child,
   .nav span,
   .soon {
+    max-width: 100%;
     opacity: 1;
     pointer-events: auto;
+  }
+  .brand {
+    gap: 12px;
+    justify-content: flex-start;
+  }
+  .nav {
+    justify-content: flex-start;
+    padding: 0 12px;
+    width: 100%;
   }
   nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .soon { display: none; }

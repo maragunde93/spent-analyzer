@@ -680,7 +680,7 @@ function LoginScreen() {
 
 function NavButton(props: { active: boolean; icon: ReactNode; label: string; onClick: () => void }) {
   return (
-    <button className={props.active ? "nav active" : "nav"} type="button" onClick={props.onClick}>
+    <button className={props.active ? "nav active" : "nav"} type="button" title={props.label} aria-label={props.label} onClick={props.onClick}>
       {props.icon}
       <span>{props.label}</span>
     </button>
