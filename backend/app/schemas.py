@@ -126,6 +126,7 @@ class DashboardSummary(BaseModel):
     trend: list[dict]
     monthly_by_category: list[dict] = []
     cumulative_by_category: list[dict] = []
+    card_statement_periods: list[str] = []
     recurring_preview: list[dict]
     fx_rate: DashboardFxRate | None = None
 

@@ -406,6 +406,33 @@ nav, .soon, .stack { display: flex; flex-direction: column; gap: 10px; }
   color: #f8fafc;
   font-weight: 700;
 }
+.average-table-wrap {
+  overflow: auto;
+}
+.average-table {
+  min-width: 860px;
+  table-layout: fixed;
+}
+.average-table th:first-child,
+.average-table td:first-child {
+  width: 28%;
+}
+.average-table th:not(:first-child),
+.average-table td:not(:first-child) {
+  text-align: right;
+}
+.category-cell {
+  align-items: center;
+  display: inline-flex;
+  gap: 9px;
+  min-width: 0;
+}
+.category-cell i {
+  border-radius: 999px;
+  flex: 0 0 auto;
+  height: 12px;
+  width: 12px;
+}
 .link-button {
   align-items: center;
   background: transparent;

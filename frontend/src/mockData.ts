@@ -115,6 +115,7 @@ export const demoDashboard: DashboardSummary = {
     { period: "2026-04", Delivery: "105000.00", "Sin categoria": "254000.00", Servicios: "85000.00" },
     { period: "2026-05", Delivery: "144380.00", "Sin categoria": "417472.90", Servicios: "85000.00", Suscripciones: "20000.00" }
   ],
+  card_statement_periods: ["2026-03", "2026-04", "2026-05"],
   fx_rate: {
     from_currency: "USD",
     to_currency: "ARS",

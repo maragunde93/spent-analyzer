@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_home_member
 from app.database import get_db
 from app.domain import Currency, ExpenseSource
-from app.models import Category, Expense, FxRate, ImportBatch, ImportLine, RecurringRule, Subcategory, User
+from app.models import Category, Expense, FxRate, ImportBatch, ImportLine, Membership, RecurringRule, Subcategory, User
 from app.schemas import DashboardSummary
 from app.services.recurring import recurring_display_name, recurring_identity
 
@@ -165,6 +165,7 @@ def dashboard(
             for period, values in sorted(monthly_by_category.items())
         ],
         cumulative_by_category=cumulative_by_category,
+        card_statement_periods=_card_statement_periods(db, home_group_id, paid_by_user_id),
         recurring_preview=recurring,
         fx_rate=_dashboard_fx_rate(db, end or date.today()),
     )
@@ -224,6 +225,40 @@ def _recent_card_statement_scope(db: Session, home_group_id: int, limit: int = 2
     batch_ids = [batch.id for batch in recent_batches]
     lines = list(db.scalars(select(ImportLine).where(ImportLine.import_batch_id.in_(batch_ids))))
     return {line.id for line in lines}, {line.date.strftime("%Y-%m") for line in lines}
+
+
+def _card_statement_periods(db: Session, home_group_id: int, paid_by_user_id: int | None = None) -> list[str]:
+    stmt = (
+        select(ImportBatch, ImportLine, Expense.paid_by_user_id)
+        .join(ImportLine, ImportLine.import_batch_id == ImportBatch.id)
+        .join(Expense, Expense.import_line_id == ImportLine.id)
+        .where(
+            ImportBatch.home_group_id == home_group_id,
+            ImportBatch.source_type != "bbva_account_xls",
+            Expense.home_group_id == home_group_id,
+            Expense.source == ExpenseSource.import_pdf,
+        )
+    )
+    if paid_by_user_id:
+        stmt = stmt.where(Expense.paid_by_user_id == paid_by_user_id)
+
+    periods_by_user: dict[int, set[str]] = {}
+    for batch, line, payer_id in db.execute(stmt):
+        statement_period = _parse_statement_period(batch.period_label)
+        period = statement_period.strftime("%Y-%m") if statement_period else line.date.strftime("%Y-%m")
+        periods_by_user.setdefault(payer_id, set()).add(period)
+
+    if paid_by_user_id:
+        return sorted(periods_by_user.get(paid_by_user_id, set()))
+
+    household_user_ids = set(db.scalars(select(Membership.user_id).where(Membership.home_group_id == home_group_id)))
+    if not household_user_ids:
+        household_user_ids = set(periods_by_user)
+    common_periods: set[str] | None = None
+    for user_id in household_user_ids:
+        user_periods = periods_by_user.get(user_id, set())
+        common_periods = set(user_periods) if common_periods is None else common_periods & user_periods
+    return sorted(common_periods or set())
 
 
 def _card_batch_sort_key(batch: ImportBatch) -> tuple[date, datetime, int]:

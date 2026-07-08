@@ -135,6 +135,16 @@ function monthPeriods(year: number) {
   return Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}`);
 }
 
+function shiftMonthPeriod(period: string, offset: number) {
+  const [year, month] = period.split("-").map(Number);
+  const date = new Date(year, month - 1 + offset, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthWindowEnding(period: string, size: number) {
+  return Array.from({ length: size }, (_, index) => shiftMonthPeriod(period, index - size + 1));
+}
+
 function fillMonthlyRows(rows: Array<Record<string, string | number>>, periods: string[], keys: string[]) {
   const byPeriod = new Map(rows.map((row) => [String(row.period), row]));
   return periods.map((period) => {
@@ -259,12 +269,44 @@ function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: s
       period: String(row.period),
       values: keys.map((key) => {
         const current = Number(row[key] ?? 0);
-        const prior = previousRows.reduce((sum, previous) => sum + Number(previous[key] ?? 0), 0) / previousRows.length;
+        const priorValues = previousRows
+          .map((previous) => Number(previous[key] ?? 0))
+          .filter((value) => value !== 0);
+        const prior = priorValues.length
+          ? priorValues.reduce((sum, value) => sum + value, 0) / priorValues.length
+          : 0;
         const percent = prior === 0 ? (current === 0 ? 0 : null) : ((current - prior) / Math.abs(prior)) * 100;
         return { key, current, prior, percent };
       })
     };
   });
+}
+
+function averageForPeriods(rowsByPeriod: Map<string, Record<string, string | number>>, key: string, periods: string[]) {
+  const values = periods
+    .map((period) => Number(rowsByPeriod.get(period)?.[key] ?? 0))
+    .filter((value) => value !== 0);
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function categoryAverageRows(
+  rows: Array<Record<string, string | number>>,
+  keys: string[],
+  latestStatementPeriod: string | null,
+  annualReferenceYear: number
+) {
+  if (!latestStatementPeriod) return [];
+  const rowsByPeriod = new Map(rows.map((row) => [String(row.period), row]));
+  const previousYearPeriods = monthPeriods(annualReferenceYear);
+  return keys
+    .map((key) => ({
+      key,
+      lastMonth: Number(rowsByPeriod.get(latestStatementPeriod)?.[key] ?? 0),
+      average3: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 3)),
+      average6: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 6)),
+      annualAverage: averageForPeriods(rowsByPeriod, key, previousYearPeriods)
+    }))
+    .sort((a, b) => Math.max(b.lastMonth, b.average3, b.average6, b.annualAverage) - Math.max(a.lastMonth, a.average3, a.average6, a.annualAverage));
 }
 
 function importSourceLabel(batch: Pick<ImportBatch, "source_type" | "filename">) {
@@ -750,6 +792,10 @@ function Dashboard({
   const cumulativeData = netVisibleConsumptionRows(fillCumulativeRows(rawCumulativeData, periods, cumulativeKeys), cumulativeKeys);
   const deltaRows = categoryDeltaRows(monthlyData, categoryKeys);
   const deltaPeriods = deltaRows.map((row) => row.period);
+  const cardStatementPeriods = [...(data?.card_statement_periods ?? [])].sort();
+  const latestCardStatementPeriod = cardStatementPeriods.length ? cardStatementPeriods[cardStatementPeriods.length - 1] : null;
+  const annualAverageYear = currentYear - 1;
+  const averageRows = categoryAverageRows(rawMonthlyData, categoryKeys, latestCardStatementPeriod, annualAverageYear);
   const currentMonthRow = monthlyData.find((item) => item.period === currentMonth);
   const currentMonthKeys = sortKeysByPeriodAmount(monthlyData, currentMonth, categoryKeys, true);
   const chartData = currentMonthKeys.map((name) => ({ name, amount_ars: Number(currentMonthRow?.[name] ?? 0) }));
@@ -995,6 +1041,40 @@ function Dashboard({
           </AreaChart>
         </ResponsiveContainer>
         <CategoryLegend categories={categories} names={legendKeys.filter((name) => cumulativeKeys.includes(name))} active={activeChartCategory} onToggle={toggleLegendCategory} />
+      </div>
+      <div className="panel chart-panel wide">
+        <h2>Promedio mensual por categoria</h2>
+        {latestCardStatementPeriod ? (
+          <div className="average-table-wrap">
+            <table className="average-table">
+              <thead>
+                <tr>
+                  <th>Categoria</th>
+                  <th>Ultimo mes ({axisMonthLabel(latestCardStatementPeriod)})</th>
+                  <th>Promedio 3 meses</th>
+                  <th>Promedio 6 meses</th>
+                  <th>Promedio {annualAverageYear}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {averageRows.map((row) => (
+                  <tr key={row.key}>
+                    <td>
+                      <span className="category-cell">
+                        <i style={{ background: categoryColor(row.key, categories, legendKeys) }} />
+                        {row.key}
+                      </span>
+                    </td>
+                    <td>{money(row.lastMonth)}</td>
+                    <td>{money(row.average3)}</td>
+                    <td>{money(row.average6)}</td>
+                    <td>{row.annualAverage ? money(row.annualAverage) : "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="muted">Todavia no hay resumenes de tarjeta comparables para esta vista.</p>}
       </div>
       <div className="panel chart-panel wide">
         <h2>Variacion mensual por categoria {currentYear}</h2>
