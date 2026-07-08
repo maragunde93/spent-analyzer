@@ -1222,7 +1222,26 @@ function Expenses(props: {
   const visibleTotals = totalsByCurrency(props.expenses);
   const periods = Object.keys(groupedExpenses).sort().reverse();
   const hasActiveFilters = !!props.query.trim() || props.paidBy !== "all" || props.currencyFilter !== "all";
-  const isMonthExpanded = (period: string) => hasActiveFilters ? true : (expandedMonths[period] ?? period === currentMonth);
+  const activeFilterKey = `${props.query.trim().toLowerCase()}|${props.paidBy}|${props.currencyFilter}`;
+  const periodKey = periods.join("|");
+  const previousFilterKey = useRef(activeFilterKey);
+  useEffect(() => {
+    const filterChanged = previousFilterKey.current !== activeFilterKey;
+    previousFilterKey.current = activeFilterKey;
+    if (!hasActiveFilters) return;
+    setExpandedMonths((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const period of periods) {
+        if ((filterChanged || next[period] === undefined) && next[period] !== true) {
+          next[period] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [activeFilterKey, hasActiveFilters, periodKey]);
+  const isMonthExpanded = (period: string) => expandedMonths[period] ?? period === currentMonth;
   const updateSort = (key: ExpenseSortKey) => {
     setSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "amount" || key === "date" ? "desc" : "asc" });
   };
