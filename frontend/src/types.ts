@@ -73,6 +73,7 @@ export type DashboardSummary = {
     annualized_amount?: string;
     currency: Currency;
     cadence: string;
+    warning?: string | null;
     items?: Array<{ date: string; description: string; amount: string; amount_ars: string; currency: Currency }>;
   }>;
 };

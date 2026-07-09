@@ -541,6 +541,12 @@ nav, .soon, .stack { display: flex; flex-direction: column; gap: 10px; }
   font-weight: 650;
   max-width: 100%;
 }
+.recurring-warning {
+  flex: 0 0 auto;
+  font-size: 12px;
+  min-height: 22px;
+  padding: 0 8px;
+}
 .recurring-detail-row td {
   background: rgba(15, 23, 42, 0.68);
   color: #a8bfd8;

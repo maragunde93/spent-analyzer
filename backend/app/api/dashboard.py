@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 import re
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_home_member
 from app.database import get_db
 from app.domain import Currency, ExpenseSource
-from app.models import Category, Expense, FxRate, ImportBatch, ImportLine, Membership, RecurringRule, Subcategory, User
+from app.models import Category, Expense, FxRate, ImportBatch, ImportLine, RecurringRule, Subcategory, User
 from app.schemas import DashboardSummary
 from app.services.recurring import recurring_display_name, recurring_identity
 from app.services.statement_period import infer_card_statement_period, parse_card_due_date
@@ -70,7 +71,8 @@ def dashboard(
         cumulative_by_category.append(row)
 
     latest_period = max((expense.date.strftime("%Y-%m") for expense in expenses), default=None)
-    recent_card_line_ids, recent_card_periods = _recent_card_statement_scope(db, home_group_id)
+    recent_card_scopes, card_line_scopes = _recent_card_statement_scopes(db, home_group_id, paid_by_user_id)
+    recent_card_line_ids, recent_card_periods = _recent_card_statement_scope(db, home_group_id, paid_by_user_id)
     recurring_groups: dict[str, list[Expense]] = {}
     for expense in sorted(expenses, key=lambda item: (item.date, item.id)):
         if expense.is_recurring:
@@ -90,23 +92,42 @@ def dashboard(
         if not positive_months:
             continue
         last_period = max(positive_months)
-        has_card_expense = any(expense.source == ExpenseSource.import_pdf for expense in grouped_expenses)
-        has_recent_card_expense = any(
-            expense.import_line_id in recent_card_line_ids or expense.date.strftime("%Y-%m") in recent_card_periods
-            for expense in grouped_expenses
-            if expense.source == ExpenseSource.import_pdf
-        )
-        if has_card_expense and recent_card_line_ids:
-            if not has_recent_card_expense:
-                continue
-        elif latest_period and _month_distance(last_period, latest_period) > 1:
-            continue
         positive_expenses = [expense for expense in grouped_expenses if Decimal(expense.original_amount) > 0]
         if not positive_expenses:
             continue
         latest_expense = sorted(positive_expenses, key=lambda item: (item.date, item.id))[-1]
         category_name = categories.get(latest_expense.category_id, "Sin categoria")
         subcategory_name = subcategories.get(latest_expense.subcategory_id) if latest_expense.subcategory_id else None
+        is_service_group = category_name == "Servicios"
+        recurring_warning = None
+        has_card_expense = any(expense.source == ExpenseSource.import_pdf for expense in grouped_expenses)
+        card_expenses = [expense for expense in grouped_expenses if expense.source == ExpenseSource.import_pdf]
+        has_recent_global_card_expense = any(
+            _is_recent_card_expense_in_scope(expense, recent_card_line_ids, recent_card_periods)
+            for expense in card_expenses
+        )
+        has_recent_card_expense = any(
+            _is_recent_card_expense(expense, recent_card_scopes, card_line_scopes)
+            for expense in card_expenses
+        )
+        has_card_scope = any(
+            _card_scope_for_expense(expense, recent_card_scopes, card_line_scopes) is not None
+            for expense in card_expenses
+        )
+        if has_card_expense and has_card_scope:
+            if not has_recent_card_expense:
+                if is_service_group:
+                    if not has_recent_global_card_expense and not _has_recent_non_card_expense(grouped_expenses, latest_period):
+                        recurring_warning = "No se detecto pago en los ultimos 2 resumenes de tarjeta ni en gastos de debito recientes."
+                else:
+                    continue
+            elif is_service_group and not has_recent_global_card_expense and not _has_recent_non_card_expense(grouped_expenses, latest_period):
+                recurring_warning = "No se detecto pago en los ultimos 2 resumenes de tarjeta ni en gastos de debito recientes."
+        elif latest_period and _month_distance(last_period, latest_period) > 1:
+            if is_service_group:
+                recurring_warning = "No se detecto pago reciente en los gastos cargados."
+            else:
+                continue
         accumulated = sum(positive_months.values(), Decimal("0"))
         monthly_average = accumulated / Decimal(len(positive_months))
         accumulated_ars = sum((amount for amount in monthly_ars_totals.values() if amount > 0), Decimal("0"))
@@ -125,6 +146,7 @@ def dashboard(
                 "sort_amount_ars": monthly_average_ars,
                 "currency": latest_expense.currency.value,
                 "cadence": "monthly",
+                "warning": recurring_warning,
                 "items": [
                     {
                         "date": expense.date.isoformat(),
@@ -152,6 +174,7 @@ def dashboard(
                 "annualized_amount": (rule.expected_amount or Decimal("0")) * Decimal("12"),
                 "currency": rule.currency.value,
                 "cadence": rule.cadence,
+                "warning": None,
                 "items": [],
             }
             for rule in db.scalars(select(RecurringRule).where(RecurringRule.home_group_id == home_group_id, RecurringRule.active == True))
@@ -211,21 +234,140 @@ def _month_distance(older_period: str, newer_period: str) -> int:
     return (newer_year - older_year) * 12 + newer_month - older_month
 
 
-def _recent_card_statement_scope(db: Session, home_group_id: int, limit: int = 2) -> tuple[set[int], set[str]]:
-    batches = list(
-        db.scalars(
-            select(ImportBatch).where(
-                ImportBatch.home_group_id == home_group_id,
-                ImportBatch.source_type != "bbva_account_xls",
-            )
+def _has_recent_non_card_expense(expenses: list[Expense], latest_period: str | None) -> bool:
+    if not latest_period:
+        return False
+    return any(
+        expense.source != ExpenseSource.import_pdf
+        and Decimal(expense.original_amount) > 0
+        and _month_distance(expense.date.strftime("%Y-%m"), latest_period) <= 1
+        for expense in expenses
+    )
+
+
+CardScopeKey = tuple[int, str]
+CardScope = dict[str, set[int] | set[str]]
+
+
+def _recent_card_statement_scope(
+    db: Session,
+    home_group_id: int,
+    paid_by_user_id: int | None = None,
+    limit: int = 2,
+) -> tuple[set[int], set[str]]:
+    stmt = (
+        select(ImportBatch, ImportLine)
+        .join(ImportLine, ImportLine.import_batch_id == ImportBatch.id)
+        .join(Expense, Expense.import_line_id == ImportLine.id)
+        .where(
+            ImportBatch.home_group_id == home_group_id,
+            ImportBatch.source_type != "bbva_account_xls",
+            Expense.home_group_id == home_group_id,
+            Expense.source == ExpenseSource.import_pdf,
         )
     )
-    if not batches:
-        return set(), set()
-    recent_batches = sorted(batches, key=_card_batch_sort_key, reverse=True)[:limit]
-    batch_ids = [batch.id for batch in recent_batches]
-    lines = list(db.scalars(select(ImportLine).where(ImportLine.import_batch_id.in_(batch_ids))))
-    return {line.id for line in lines}, {_statement_period_for_batch(batch) for batch in recent_batches if _statement_period_for_batch(batch)}
+    if paid_by_user_id:
+        stmt = stmt.where(Expense.paid_by_user_id == paid_by_user_id)
+
+    rows = [
+        (_card_batch_sort_key(batch), _statement_period_for_batch(batch) or line.date.strftime("%Y-%m"), line.id)
+        for batch, line in db.execute(stmt)
+    ]
+    recent_periods: list[str] = []
+    for _, period, _ in sorted(rows, key=lambda item: item[0], reverse=True):
+        if period not in recent_periods:
+            recent_periods.append(period)
+        if len(recent_periods) == limit:
+            break
+    recent_period_set = set(recent_periods)
+    return {line_id for _, period, line_id in rows if period in recent_period_set}, recent_period_set
+
+
+def _recent_card_statement_scopes(
+    db: Session,
+    home_group_id: int,
+    paid_by_user_id: int | None = None,
+    limit: int = 2,
+) -> tuple[dict[CardScopeKey, CardScope], dict[int, CardScopeKey]]:
+    stmt = (
+        select(ImportBatch, ImportLine, Expense.paid_by_user_id)
+        .join(ImportLine, ImportLine.import_batch_id == ImportBatch.id)
+        .join(Expense, Expense.import_line_id == ImportLine.id)
+        .where(
+            ImportBatch.home_group_id == home_group_id,
+            ImportBatch.source_type != "bbva_account_xls",
+            Expense.home_group_id == home_group_id,
+            Expense.source == ExpenseSource.import_pdf,
+        )
+    )
+    if paid_by_user_id:
+        stmt = stmt.where(Expense.paid_by_user_id == paid_by_user_id)
+
+    rows_by_scope: dict[CardScopeKey, list[tuple[tuple[date, datetime, int], str, int]]] = defaultdict(list)
+    line_scopes: dict[int, CardScopeKey] = {}
+    for batch, line, payer_id in db.execute(stmt):
+        period = _statement_period_for_batch(batch) or line.date.strftime("%Y-%m")
+        account_key = batch.statement_account or batch.source_type or "card"
+        scope_key = (payer_id, account_key)
+        line_scopes[line.id] = scope_key
+        rows_by_scope[scope_key].append((_card_batch_sort_key(batch), period, line.id))
+
+    scopes: dict[CardScopeKey, CardScope] = {}
+    for scope_key, rows in rows_by_scope.items():
+        recent_periods: list[str] = []
+        for _, period, _ in sorted(rows, key=lambda item: item[0], reverse=True):
+            if period not in recent_periods:
+                recent_periods.append(period)
+            if len(recent_periods) == limit:
+                break
+        recent_period_set = set(recent_periods)
+        scopes[scope_key] = {
+            "line_ids": {line_id for _, period, line_id in rows if period in recent_period_set},
+            "periods": recent_period_set,
+        }
+    return scopes, line_scopes
+
+
+def _card_scope_for_expense(
+    expense: Expense,
+    recent_card_scopes: dict[CardScopeKey, CardScope],
+    card_line_scopes: dict[int, CardScopeKey],
+) -> CardScope | None:
+    if expense.import_line_id is not None:
+        scope_key = card_line_scopes.get(expense.import_line_id)
+        if scope_key is not None:
+            return recent_card_scopes.get(scope_key)
+    payer_scopes = [
+        scope
+        for (payer_id, _), scope in recent_card_scopes.items()
+        if payer_id == expense.paid_by_user_id
+    ]
+    if len(payer_scopes) == 1:
+        return payer_scopes[0]
+    return None
+
+
+def _is_recent_card_expense(
+    expense: Expense,
+    recent_card_scopes: dict[CardScopeKey, CardScope],
+    card_line_scopes: dict[int, CardScopeKey],
+) -> bool:
+    scope = _card_scope_for_expense(expense, recent_card_scopes, card_line_scopes)
+    if scope is None:
+        return False
+    line_ids = scope["line_ids"]
+    periods = scope["periods"]
+    return (
+        expense.import_line_id is not None
+        and expense.import_line_id in line_ids
+    ) or expense.date.strftime("%Y-%m") in periods
+
+
+def _is_recent_card_expense_in_scope(expense: Expense, line_ids: set[int], periods: set[str]) -> bool:
+    return (
+        expense.import_line_id is not None
+        and expense.import_line_id in line_ids
+    ) or expense.date.strftime("%Y-%m") in periods
 
 
 def _card_statement_periods(db: Session, home_group_id: int, paid_by_user_id: int | None = None) -> list[str]:
@@ -251,14 +393,7 @@ def _card_statement_periods(db: Session, home_group_id: int, paid_by_user_id: in
     if paid_by_user_id:
         return sorted(periods_by_user.get(paid_by_user_id, set()))
 
-    household_user_ids = set(db.scalars(select(Membership.user_id).where(Membership.home_group_id == home_group_id)))
-    if not household_user_ids:
-        household_user_ids = set(periods_by_user)
-    common_periods: set[str] | None = None
-    for user_id in household_user_ids:
-        user_periods = periods_by_user.get(user_id, set())
-        common_periods = set(user_periods) if common_periods is None else common_periods & user_periods
-    return sorted(common_periods or set())
+    return sorted(set().union(*periods_by_user.values()) if periods_by_user else set())
 
 
 def _card_batch_sort_key(batch: ImportBatch) -> tuple[date, datetime, int]:

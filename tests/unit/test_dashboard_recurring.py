@@ -33,8 +33,9 @@ class DashboardRecurringTests(unittest.TestCase):
         self.db.add_all([self.services, self.subscriptions])
         self.db.flush()
         self.water = Subcategory(home_group_id=self.home.id, category_id=self.services.id, name="Agua")
+        self.electricity = Subcategory(home_group_id=self.home.id, category_id=self.services.id, name="Electricidad")
         self.bank = Subcategory(home_group_id=self.home.id, category_id=self.services.id, name="Banco")
-        self.db.add_all([self.water, self.bank])
+        self.db.add_all([self.water, self.electricity, self.bank])
         self.db.commit()
 
     def tearDown(self):
@@ -87,7 +88,112 @@ class DashboardRecurringTests(unittest.TestCase):
 
         self.assertIn("Crunchyroll", names)
 
-    def test_card_statement_periods_use_household_common_or_filtered_user(self):
+    def test_service_missing_from_recent_card_and_debit_stays_with_warning(self):
+        visa_batch = self._card_batch("13-Apr-26", statement_account="visa-mauro")
+        edesur_line = self._card_line(visa_batch, date(2026, 3, 16), "EDESUR", Decimal("127135.77"))
+        self._expense(
+            date(2026, 3, 16),
+            "EDESUR",
+            self.services.id,
+            self.electricity.id,
+            Decimal("127135.77"),
+            True,
+            source=ExpenseSource.import_pdf,
+            import_line_id=edesur_line.id,
+            paid_by_user_id=self.user.id,
+        )
+        mastercard_may_batch = self._card_batch("13-Jun-26", statement_account="master-mauro")
+        mastercard_may_line = self._card_line(mastercard_may_batch, date(2026, 5, 18), "SPOTIFY", Decimal("9000.00"))
+        self._expense(
+            date(2026, 5, 18),
+            "SPOTIFY",
+            self.subscriptions.id,
+            None,
+            Decimal("9000.00"),
+            True,
+            source=ExpenseSource.import_pdf,
+            import_line_id=mastercard_may_line.id,
+            paid_by_user_id=self.user.id,
+        )
+        mastercard_june_batch = self._card_batch("13-Jul-26", statement_account="master-mauro")
+        mastercard_june_line = self._card_line(mastercard_june_batch, date(2026, 6, 18), "SPOTIFY", Decimal("9500.00"))
+        self._expense(
+            date(2026, 6, 18),
+            "SPOTIFY",
+            self.subscriptions.id,
+            None,
+            Decimal("9500.00"),
+            True,
+            source=ExpenseSource.import_pdf,
+            import_line_id=mastercard_june_line.id,
+            paid_by_user_id=self.user.id,
+        )
+        self.db.commit()
+
+        result = dashboard(self.home.id, user=self.user, db=self.db)
+        electricity = next(item for item in result.recurring_preview if item["description"] == "Electricidad")
+
+        self.assertIsNotNone(electricity["warning"])
+
+    def test_service_paid_by_debit_keeps_projection_without_warning(self):
+        visa_batch = self._card_batch("13-Apr-26", statement_account="visa-mauro")
+        edesur_line = self._card_line(visa_batch, date(2026, 3, 16), "EDESUR", Decimal("127135.77"))
+        self._expense(
+            date(2026, 3, 16),
+            "EDESUR",
+            self.services.id,
+            self.electricity.id,
+            Decimal("127135.77"),
+            True,
+            source=ExpenseSource.import_pdf,
+            import_line_id=edesur_line.id,
+            paid_by_user_id=self.user.id,
+        )
+        mastercard_may_batch = self._card_batch("13-Jun-26", statement_account="master-mauro")
+        mastercard_may_line = self._card_line(mastercard_may_batch, date(2026, 5, 18), "SPOTIFY", Decimal("9000.00"))
+        self._expense(
+            date(2026, 5, 18),
+            "SPOTIFY",
+            self.subscriptions.id,
+            None,
+            Decimal("9000.00"),
+            True,
+            source=ExpenseSource.import_pdf,
+            import_line_id=mastercard_may_line.id,
+            paid_by_user_id=self.user.id,
+        )
+        mastercard_june_batch = self._card_batch("13-Jul-26", statement_account="master-mauro")
+        mastercard_june_line = self._card_line(mastercard_june_batch, date(2026, 6, 18), "SPOTIFY", Decimal("9500.00"))
+        self._expense(
+            date(2026, 6, 18),
+            "SPOTIFY",
+            self.subscriptions.id,
+            None,
+            Decimal("9500.00"),
+            True,
+            source=ExpenseSource.import_pdf,
+            import_line_id=mastercard_june_line.id,
+            paid_by_user_id=self.user.id,
+        )
+        self._expense(
+            date(2026, 6, 20),
+            "EDESUR",
+            self.services.id,
+            self.electricity.id,
+            Decimal("130000.00"),
+            True,
+            source=ExpenseSource.bank_import,
+            paid_by_user_id=self.user.id,
+        )
+        self.db.commit()
+
+        result = dashboard(self.home.id, user=self.user, db=self.db)
+        electricity = next(item for item in result.recurring_preview if item["description"] == "Electricidad")
+
+        self.assertIsNone(electricity["warning"])
+        self.assertEqual(electricity["last_period"], "2026-06")
+
+    def test_card_statement_periods_use_household_union_or_filtered_user(self):
         mauro_may_batch = self._card_batch("13-Jun-26")
         mauro_may_line = self._card_line(mauro_may_batch, date(2026, 5, 18), "CRUNCHYROLL", Decimal("8000.00"))
         self._expense(
@@ -132,7 +238,7 @@ class DashboardRecurringTests(unittest.TestCase):
         household_result = dashboard(self.home.id, user=self.user, db=self.db)
         mauro_result = dashboard(self.home.id, paid_by_user_id=self.user.id, user=self.user, db=self.db)
 
-        self.assertEqual(household_result.card_statement_periods, ["2026-05"])
+        self.assertEqual(household_result.card_statement_periods, ["2026-05", "2026-06"])
         self.assertEqual(mauro_result.card_statement_periods, ["2026-05", "2026-06"])
 
     def _expense(
@@ -165,12 +271,13 @@ class DashboardRecurringTests(unittest.TestCase):
         self.db.add(expense)
         return expense
 
-    def _card_batch(self, period_label: str) -> ImportBatch:
+    def _card_batch(self, period_label: str, statement_account: str | None = None) -> ImportBatch:
         batch = ImportBatch(
             home_group_id=self.home.id,
             uploaded_by_user_id=self.user.id,
             filename="card.pdf",
             source_type="bbva_visa_pdf",
+            statement_account=statement_account,
             period_label=period_label,
         )
         self.db.add(batch)
