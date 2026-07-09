@@ -962,6 +962,11 @@ function Dashboard({
                           >
                             {expandedRecurring[rowKey] ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                             {item.description}
+                            {item.warning && (
+                              <span className="status warning-status recurring-warning" title={item.warning}>
+                                <AlertTriangle size={14} /> Revisar
+                              </span>
+                            )}
                           </button>
                         </td>
                         <td>{item.category ?? "Sin categoria"}</td>
