@@ -26,7 +26,7 @@ services:
       SPENT_TEST_AUTH_ENABLED: "false"
       SPENT_PUBLIC_BASE_URL: http://localhost:8080/finance
       SPENT_PUBLIC_API_BASE_URL: http://localhost:8080/finance/api
-      SPENT_LOCAL_USERS: '[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$$260000$$2pVSTv4HbgAOKvbaAGMnGQ==$$feqKyBaYhvwm-SEKvl5n88HuYFZ9HgZcecC0BANnIzM="}]'
+      SPENT_LOCAL_USERS: '[{"username":"mauro","email":"mauro@example.test","display_name":"Mauro","password_hash":"pbkdf2_sha256$$260000$$2pVSTv4HbgAOKvbaAGMnGQ==$$feqKyBaYhvwm-SEKvl5n88HuYFZ9HgZcecC0BANnIzM="},{"username":"mica","email":"mica@example.test","display_name":"Mica","password_hash":"pbkdf2_sha256$$260000$$scS_1EEtDmi2D5srrRN2xg==$$igV54oG2AUzEbDoB7YpFlEQL8bYGChimSB5FG9unoK8="}]'
       SPENT_SESSION_SECRET: local-dev-session-secret-change-for-shared-hosts
       SPENT_SESSION_COOKIE_PATH: /finance
       SPENT_SESSION_COOKIE_SECURE: "false"
