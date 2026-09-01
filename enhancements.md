@@ -4,3 +4,11 @@ Lee docs/codex_context.md y trabaja solo en el modulo de historial, quiero que e
 
 
 Since the google authentication will require all the Https csetupp with a known CA, we will shift to local authentication with a self signed certificate. Please uppdate the finance app to have a local authentication with username and password. Also provide the specific steps by step to create a self signed certificate in the mini pc and setup it for the whole nginx. Finally  verify that the alerting-system will keep working with the SSL configuration.
+
+
+Producto online:
+
+- Agrega notificaciones por mail / telegram u otros para recordar cargar el resumen de tarjeta. Permitir habilitar / deshabilitar las mismas
+
+- Tener en cuenta oportunidades de diferenciacion vs Gasti https://chatgpt.com/c/6a512dd6-cc4c-83e9-9ad4-648e0d9bf997
+
