@@ -51,6 +51,14 @@ export type DashboardSummary = {
   by_user: Array<{ user_id: number; amount_ars: string }>;
   trend: Array<{ period: string; amount_ars: string }>;
   monthly_by_category: Array<Record<string, string>>;
+  monthly_category_by_payer: Array<{
+    period: string;
+    categories: Array<{
+      name: string;
+      total_amount_ars: string;
+      by_user: Array<{ user_id: number; amount_ars: string }>;
+    }>;
+  }>;
   cumulative_by_category: Array<Record<string, string>>;
   card_statement_periods?: string[];
   fx_rate?: {

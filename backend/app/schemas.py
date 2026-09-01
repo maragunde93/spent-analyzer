@@ -125,6 +125,7 @@ class DashboardSummary(BaseModel):
     by_user: list[dict]
     trend: list[dict]
     monthly_by_category: list[dict] = []
+    monthly_category_by_payer: list[dict] = []
     cumulative_by_category: list[dict] = []
     card_statement_periods: list[str] = []
     recurring_preview: list[dict]

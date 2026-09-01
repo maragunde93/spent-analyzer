@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -28,10 +28,10 @@ import {
   Wrench,
   X
 } from "lucide-react";
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Customized, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, apiFallbacksEnabled } from "./api";
 import { categories as fallbackCategories, users as fallbackUsers } from "./mockData";
-import type { Category, Currency, Expense, ExpenseSource, ImportBatch, ImportLine, ReceiptImport, ReceiptItem, User } from "./types";
+import type { Category, Currency, DashboardSummary, Expense, ExpenseSource, ImportBatch, ImportLine, ReceiptImport, ReceiptItem, User } from "./types";
 
 function money(value: string | number, currency = "ARS") {
   return new Intl.NumberFormat("es-AR", {
@@ -54,6 +54,7 @@ function fxSourceLabel(source?: string) {
 }
 
 const chartColors = ["#334155", "#475569", "#64748b", "#71717a", "#94a3b8", "#0ea5e9", "#2563eb", "#60a5fa", "#38bdf8", "#ef4444"];
+const payerColors = ["#22c55e", "#f97316", "#38bdf8", "#e879f9", "#facc15", "#fb7185", "#a78bfa", "#14b8a6"];
 const noDashboardCategoriesSelected = -1;
 const legendOrder = [
   "Delivery",
@@ -127,6 +128,10 @@ function monthPeriods(year: number) {
   return Array.from({ length: 12 }, (_, index) => `${year}-${String(index + 1).padStart(2, "0")}`);
 }
 
+function currentMonthPeriod(now = new Date()) {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
 function shiftMonthPeriod(period: string, offset: number) {
   const [year, month] = period.split("-").map(Number);
   const date = new Date(year, month - 1 + offset, 1);
@@ -179,7 +184,11 @@ function buildSortedStackRows(rows: Array<Record<string, string | number>>, peri
   return periods.map((period) => {
     const row = byPeriod.get(period) ?? { period };
     const sorted = [...keys].sort((a, b) => Number(row[b] ?? 0) - Number(row[a] ?? 0));
-    const output: Record<string, string | number> = { period, period_label: axisMonthLabel(period) };
+    const output: Record<string, string | number> = {
+      period,
+      period_label: axisMonthLabel(period),
+      monthly_total: keys.reduce((sum, key) => sum + Number(row[key] ?? 0), 0)
+    };
     sorted.forEach((key, index) => {
       output[`slot_${index}`] = Number(row[key] ?? 0);
       output[`slot_${index}_category`] = key;
@@ -217,7 +226,7 @@ function formatCurrencyTotals(totals: Partial<Record<Currency, number>>) {
 
 type ExpenseSortKey = "date" | "description" | "paid_by" | "category" | "source" | "recurring" | "amount" | "notes";
 type ExpenseSort = { key: ExpenseSortKey; direction: "asc" | "desc" };
-type AverageSortKey = "category" | "lastMonth" | "average3" | "average6" | "annualAverage";
+type AverageSortKey = "category" | "currentMonth" | "lastMonth" | "average6";
 type AverageSort = { key: AverageSortKey; direction: "asc" | "desc" };
 
 function sortIndicator(sort: ExpenseSort, key: ExpenseSortKey) {
@@ -290,21 +299,19 @@ function averageForPeriods(rowsByPeriod: Map<string, Record<string, string | num
 function categoryAverageRows(
   rows: Array<Record<string, string | number>>,
   keys: string[],
+  currentPeriod: string,
   latestStatementPeriod: string | null,
-  loadedStatementPeriods: string[],
-  annualReferenceYear: number
+  loadedStatementPeriods: string[]
 ) {
   if (!latestStatementPeriod) return [];
   const rowsByPeriod = new Map(rows.map((row) => [String(row.period), row]));
   const loadedPeriods = new Set(loadedStatementPeriods);
-  const previousYearPeriods = monthPeriods(annualReferenceYear);
   return keys
     .map((key) => ({
       key,
+      currentMonth: Number(rowsByPeriod.get(currentPeriod)?.[key] ?? 0),
       lastMonth: Number(rowsByPeriod.get(latestStatementPeriod)?.[key] ?? 0),
-      average3: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 3), loadedPeriods),
-      average6: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 6), loadedPeriods),
-      annualAverage: averageForPeriods(rowsByPeriod, key, previousYearPeriods, loadedPeriods)
+      average6: averageForPeriods(rowsByPeriod, key, monthWindowEnding(latestStatementPeriod, 6), loadedPeriods)
     }));
 }
 
@@ -484,6 +491,65 @@ function categoryColor(name: string, categories: Array<Pick<Category, "name" | "
 
 function categoryOpacity(active: string | null, name: string) {
   return active && active !== name ? 0.18 : 1;
+}
+
+function payerName(userId: number, users: Array<Pick<User, "id" | "display_name">>) {
+  return users.find((user) => user.id === userId)?.display_name ?? `Usuario #${userId}`;
+}
+
+function payerColor(userId: number, users: Array<Pick<User, "id">>) {
+  const index = users.findIndex((user) => user.id === userId);
+  return payerColors[(index >= 0 ? index : Math.abs(userId)) % payerColors.length];
+}
+
+type CategoryPayerChartRow = {
+  category: string;
+  total: number;
+  visibleTotal: number;
+  selectedPeriods: string[];
+  byUser: Array<{ userId: number; amount: number; visibleAmount: number }>;
+};
+
+function buildCategoryPayerRows(
+  rows: DashboardSummary["monthly_category_by_payer"],
+  selectedPeriods: string[]
+): CategoryPayerChartRow[] {
+  const selected = new Set(selectedPeriods);
+  const byCategory = new Map<string, Map<number, number>>();
+  for (const row of rows) {
+    if (!selected.has(row.period)) continue;
+    for (const category of row.categories) {
+      if (!byCategory.has(category.name)) byCategory.set(category.name, new Map());
+      const byUser = byCategory.get(category.name)!;
+      for (const payer of category.by_user) {
+        byUser.set(payer.user_id, (byUser.get(payer.user_id) ?? 0) + Number(payer.amount_ars));
+      }
+    }
+  }
+  return Array.from(byCategory.entries())
+    .map(([category, byUser]) => {
+      const payerAmounts = Array.from(byUser.entries()).map(([userId, amount]) => ({ userId, amount }));
+      const total = payerAmounts.reduce((sum, payer) => sum + payer.amount, 0);
+      const positiveTotal = payerAmounts.reduce((sum, payer) => sum + Math.max(0, payer.amount), 0);
+      const visibleTotal = Math.max(0, total);
+      const ratio = positiveTotal > 0 && visibleTotal < positiveTotal ? visibleTotal / positiveTotal : 1;
+      return {
+        category,
+        total,
+        visibleTotal,
+        selectedPeriods,
+        byUser: payerAmounts.map((payer) => ({
+          ...payer,
+          visibleAmount: Math.max(0, payer.amount) * ratio
+        }))
+      };
+    })
+    .filter((row) => Math.abs(row.total) > 0.005)
+    .sort((a, b) => b.total - a.total || a.category.localeCompare(b.category, "es-AR", { sensitivity: "base" }));
+}
+
+function sameStringArray(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 export function App() {
@@ -775,6 +841,47 @@ function FxRateBadge({
   );
 }
 
+function CollapsibleDashboardPanel({
+  title,
+  children,
+  className = "",
+  defaultCollapsed = false,
+  testId
+}: {
+  title: ReactNode;
+  children: ReactNode;
+  className?: string;
+  defaultCollapsed?: boolean;
+  testId?: string;
+}) {
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const bodyId = useId();
+  const titleText = typeof title === "string" ? title : "seccion";
+  return (
+    <div className={`panel collapsible-panel ${className} ${collapsed ? "is-collapsed" : ""}`} data-testid={testId}>
+      <button
+        className="section-toggle"
+        type="button"
+        aria-controls={bodyId}
+        aria-expanded={!collapsed}
+        aria-label={`${collapsed ? "Expandir" : "Colapsar"} ${titleText}`}
+        onClick={() => setCollapsed((current) => !current)}
+      >
+        <h2>{title}</h2>
+        <span className="section-toggle-indicator" aria-hidden="true">
+          {collapsed ? <ChevronRight size={17} /> : <ChevronDown size={17} />}
+          {collapsed ? "Expandir" : "Colapsar"}
+        </span>
+      </button>
+      <div className="collapsible-panel-content" aria-hidden={collapsed}>
+        <div className="collapsible-panel-body" id={bodyId}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({
   categories,
   data,
@@ -796,7 +903,9 @@ function Dashboard({
   const [activeLegendCategory, setActiveLegendCategory] = useState<string | null>(null);
   const [expandedRecurring, setExpandedRecurring] = useState<Record<string, boolean>>({});
   const [averageSort, setAverageSort] = useState<AverageSort>({ key: "average6", direction: "desc" });
+  const [selectedCategoryPayerPeriods, setSelectedCategoryPayerPeriods] = useState<string[]>([]);
   const currentYear = new Date().getFullYear();
+  const currentPeriod = currentMonthPeriod();
   const periods = monthPeriods(currentYear);
   const rawMonthlyData = toChartRows(data?.monthly_by_category ?? []);
   const baseMonthlyKeys = Array.from(new Set([...categoryNames(categories), ...chartKeys(rawMonthlyData)]));
@@ -812,17 +921,40 @@ function Dashboard({
   const deltaRows = categoryDeltaRows(monthlyData, categoryKeys, currentYearStatementPeriods);
   const deltaPeriods = deltaRows.map((row) => row.period);
   const latestCardStatementPeriod = cardStatementPeriods.length ? cardStatementPeriods[cardStatementPeriods.length - 1] : null;
-  const annualAverageYear = currentYear - 1;
   const averageRows = sortCategoryAverageRows(
-    categoryAverageRows(rawMonthlyData, categoryKeys, latestCardStatementPeriod, cardStatementPeriods, annualAverageYear),
+    categoryAverageRows(rawMonthlyData, categoryKeys, currentPeriod, latestCardStatementPeriod, cardStatementPeriods),
     averageSort
   );
+  const categoryPayerPeriods = Array.from(new Set((data?.monthly_category_by_payer ?? []).map((row) => row.period))).sort();
+  const categoryPayerRows = buildCategoryPayerRows(data?.monthly_category_by_payer ?? [], selectedCategoryPayerPeriods);
+  const categoryPayerIds = Array.from(
+    new Set(categoryPayerRows.flatMap((row) => row.byUser.filter((payer) => Math.abs(payer.amount) > 0.005).map((payer) => payer.userId)))
+  ).sort((a, b) => {
+    const indexA = users.findIndex((user) => user.id === a);
+    const indexB = users.findIndex((user) => user.id === b);
+    return (indexA >= 0 ? indexA : 999) - (indexB >= 0 ? indexB : 999) || a - b;
+  });
+  const categoryPayerChartWidth = Math.max(720, categoryPayerRows.length * 108);
   const allCategoryIds = categories.map((category) => Number(category.id));
   const noCategoriesSelected = categoryIds.includes(noDashboardCategoriesSelected);
   const activeChartCategory = activeLegendCategory ?? activeMonthlyCategory;
   const toggleLegendCategory = (name: string) => setActiveLegendCategory((current) => (current === name ? null : name));
   const updateAverageSort = (key: AverageSortKey) => {
     setAverageSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "category" ? "asc" : "desc" });
+  };
+  useEffect(() => {
+    setSelectedCategoryPayerPeriods((current) => {
+      if (!categoryPayerPeriods.length) return current.length ? [] : current;
+      const valid = current.filter((period) => categoryPayerPeriods.includes(period));
+      const next = valid.length ? valid : [categoryPayerPeriods[categoryPayerPeriods.length - 1]];
+      return sameStringArray(current, next) ? current : next;
+    });
+  }, [categoryPayerPeriods.join("|")]);
+  const toggleCategoryPayerPeriod = (period: string, checked: boolean) => {
+    setSelectedCategoryPayerPeriods((current) => {
+      const next = checked ? Array.from(new Set([...current, period])).sort() : current.filter((item) => item !== period);
+      return sameStringArray(current, next) ? current : next;
+    });
   };
   return (
     <section className="grid dashboard-grid">
@@ -880,8 +1012,8 @@ function Dashboard({
       </div>
       <div className="panel chart-panel wide" data-testid="monthly-chart-panel">
         <h2>Consumo mensual {currentYear}</h2>
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={monthlyStackData} onMouseLeave={() => setActiveMonthlyCategory(null)}>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={monthlyStackData} margin={{ top: 32, right: 8, bottom: 0, left: 0 }} onMouseLeave={() => setActiveMonthlyCategory(null)}>
             <CartesianGrid stroke="#223047" vertical={false} />
             <XAxis dataKey="period_label" tick={{ fill: "#94a3b8", fontSize: 12 }} />
             <YAxis tickFormatter={(value) => numberFormat(value)} tick={{ fill: "#94a3b8", fontSize: 12 }} />
@@ -911,9 +1043,59 @@ function Dashboard({
                 })}
               </Bar>
             ))}
+            <Customized component={<MonthlyTotalLabels rows={monthlyStackData} />} />
           </BarChart>
         </ResponsiveContainer>
         <CategoryLegend categories={categories} names={legendKeys} active={activeChartCategory} onToggle={toggleLegendCategory} />
+      </div>
+      <div className="panel chart-panel wide category-consumption-panel" data-testid="category-consumption-chart-panel">
+        <div className="chart-heading-row">
+          <h2>Consumos por categoria</h2>
+          <div className="chart-month-selector" aria-label="Meses para consumos por categoria">
+            {categoryPayerPeriods.map((period) => (
+              <label className="check-row month-check" key={period}>
+                <input
+                  type="checkbox"
+                  aria-label={`Mes ${axisMonthLabel(period)}`}
+                  checked={selectedCategoryPayerPeriods.includes(period)}
+                  onChange={(event) => toggleCategoryPayerPeriod(period, event.target.checked)}
+                />
+                {axisMonthLabel(period)}
+              </label>
+            ))}
+          </div>
+        </div>
+        {categoryPayerPeriods.length ? (
+          <>
+            <div className="wide-chart-scroll">
+              <div className="category-consumption-chart-inner" style={{ minWidth: categoryPayerChartWidth }}>
+                <ResponsiveContainer width="100%" height={320}>
+                  <BarChart data={categoryPayerRows} margin={{ top: 34, right: 24, bottom: 64, left: 8 }}>
+                    <CartesianGrid stroke="#223047" vertical={false} />
+                    <XAxis dataKey="category" interval={0} height={74} tick={<CategoryAxisTick />} />
+                    <YAxis tickFormatter={(value) => numberFormat(value)} tick={{ fill: "#94a3b8", fontSize: 12 }} />
+                    <Tooltip
+                      content={<CategoryPayerTooltip users={users} />}
+                      cursor={false}
+                      contentStyle={{ background: "#0f172a", border: "1px solid #263449", color: "#e2e8f0" }}
+                      itemStyle={{ color: "#e2e8f0" }}
+                      labelStyle={{ color: "#e2e8f0" }}
+                    />
+                    <Bar
+                      dataKey="visibleTotal"
+                      shape={<CategoryPayerBarShape users={users} />}
+                      isAnimationActive={false}
+                      activeBar={false}
+                    >
+                      <LabelList dataKey="total" content={<CategoryTotalLabel />} />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            <PayerLegend users={users} userIds={categoryPayerIds} />
+          </>
+        ) : <p className="muted">Todavia no hay consumos por categoria para esta vista.</p>}
       </div>
       <div className="panel recurring-panel wide">
         <h2>Proyeccion recurrente</h2>
@@ -997,8 +1179,7 @@ function Dashboard({
           </div>
         ) : <p className="muted">Todavia no hay consumos marcados como recurrentes.</p>}
       </div>
-      <div className="panel chart-panel wide cumulative-chart">
-        <h2>Consumo acumulado {currentYear}</h2>
+      <CollapsibleDashboardPanel title={`Consumo acumulado ${currentYear}`} className="chart-panel wide cumulative-chart" defaultCollapsed testId="cumulative-section">
         <ResponsiveContainer width="100%" height={420}>
           <AreaChart data={cumulativeData}>
             <CartesianGrid stroke="#223047" vertical={false} />
@@ -1036,9 +1217,8 @@ function Dashboard({
           </AreaChart>
         </ResponsiveContainer>
         <CategoryLegend categories={categories} names={legendKeys.filter((name) => cumulativeKeys.includes(name))} active={activeChartCategory} onToggle={toggleLegendCategory} />
-      </div>
-      <div className="panel chart-panel wide">
-        <h2>Promedio mensual por categoria</h2>
+      </CollapsibleDashboardPanel>
+      <CollapsibleDashboardPanel title="Promedio mensual por categoria" className="chart-panel wide" defaultCollapsed testId="category-average-section">
         {latestCardStatementPeriod ? (
           <div className="average-table-wrap">
             <table className="average-table">
@@ -1050,6 +1230,11 @@ function Dashboard({
                     </button>
                   </th>
                   <th>
+                    <button className="sort-header" type="button" onClick={() => updateAverageSort("currentMonth")}>
+                      Mes en curso{averageSortIndicator(averageSort, "currentMonth")}
+                    </button>
+                  </th>
+                  <th>
                     <button className="sort-header" type="button" onClick={() => updateAverageSort("lastMonth")}>
                       <span className="header-lines">
                         <span>Ultimo mes</span>
@@ -1058,26 +1243,10 @@ function Dashboard({
                     </button>
                   </th>
                   <th>
-                    <button className="sort-header" type="button" onClick={() => updateAverageSort("average3")}>
-                      <span className="header-lines">
-                        <span>Promedio mensual</span>
-                        <span>(3 meses){averageSortIndicator(averageSort, "average3")}</span>
-                      </span>
-                    </button>
-                  </th>
-                  <th>
                     <button className="sort-header" type="button" onClick={() => updateAverageSort("average6")}>
                       <span className="header-lines">
                         <span>Promedio mensual</span>
                         <span>(6 meses){averageSortIndicator(averageSort, "average6")}</span>
-                      </span>
-                    </button>
-                  </th>
-                  <th>
-                    <button className="sort-header" type="button" onClick={() => updateAverageSort("annualAverage")}>
-                      <span className="header-lines">
-                        <span>Promedio anual</span>
-                        <span>({annualAverageYear}){averageSortIndicator(averageSort, "annualAverage")}</span>
                       </span>
                     </button>
                   </th>
@@ -1092,19 +1261,17 @@ function Dashboard({
                         {row.key}
                       </span>
                     </td>
+                    <td>{money(row.currentMonth)}</td>
                     <td>{money(row.lastMonth)}</td>
-                    <td>{money(row.average3)}</td>
                     <td>{money(row.average6)}</td>
-                    <td>{row.annualAverage ? money(row.annualAverage) : "-"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         ) : <p className="muted">Todavia no hay resumenes de tarjeta comparables para esta vista.</p>}
-      </div>
-      <div className="panel chart-panel wide">
-        <h2>Variacion mensual por categoria {currentYear}</h2>
+      </CollapsibleDashboardPanel>
+      <CollapsibleDashboardPanel title={`Variacion mensual por categoria ${currentYear}`} className="chart-panel wide" defaultCollapsed testId="category-variation-section">
         <div className="delta-table-wrap">
           <table className="delta-table">
             <thead>
@@ -1132,7 +1299,7 @@ function Dashboard({
             </tbody>
           </table>
         </div>
-      </div>
+      </CollapsibleDashboardPanel>
     </section>
   );
 }
@@ -1155,6 +1322,182 @@ function MonthlySegmentTooltip({
     <div className="chart-tooltip" role="tooltip">
       <strong>{activeCategory}</strong>
       <span>{money(value)}</span>
+    </div>
+  );
+}
+
+function MonthlyTotalLabels({
+  rows,
+  xAxisMap,
+  yAxisMap,
+  offset
+}: {
+  rows: Array<Record<string, string | number>>;
+  xAxisMap?: Record<string, { scale?: ((value: string) => number) & { bandwidth?: () => number } }>;
+  yAxisMap?: Record<string, { scale?: (value: number) => number }>;
+  offset?: { left?: number; width?: number };
+}) {
+  const xScale = xAxisMap?.["0"]?.scale;
+  const yScale = yAxisMap?.["0"]?.scale;
+  if (!xScale || !yScale) return null;
+  const bandWidth = xScale.bandwidth?.() ?? Number(offset?.width ?? 0) / Math.max(rows.length, 1);
+  return (
+    <g>
+      {rows.map((row) => {
+        const total = Number(row.monthly_total ?? 0);
+        if (total <= 0) return null;
+        const labelX = xScale(String(row.period_label)) + bandWidth / 2;
+        const labelY = yScale(total) - 9;
+        return (
+          <text key={String(row.period)} x={labelX} y={labelY} textAnchor="middle" className="bar-total-label monthly-total-label" data-testid="monthly-total-label">
+            {money(total)}
+          </text>
+        );
+      })}
+    </g>
+  );
+}
+
+function CategoryPayerTooltip({
+  active,
+  payload,
+  users
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: CategoryPayerChartRow }>;
+  users: User[];
+}) {
+  if (!active || !payload?.length || !payload[0].payload) return null;
+  const row = payload[0].payload;
+  return (
+    <div className="chart-tooltip category-payer-tooltip" role="tooltip">
+      <strong>{row.category}</strong>
+      <small>{row.selectedPeriods.map(axisMonthLabel).join(" / ")}</small>
+      <span>{money(row.total)}</span>
+      {row.byUser
+        .filter((payer) => Math.abs(payer.amount) > 0.005)
+        .sort((a, b) => b.amount - a.amount)
+        .map((payer) => {
+          const percent = row.total ? (payer.amount / row.total) * 100 : 0;
+          return (
+            <div className="tooltip-row" key={payer.userId}>
+              <i style={{ background: payerColor(payer.userId, users) }} />
+              <span>{payerName(payer.userId, users)}</span>
+              <strong>{money(payer.amount)}</strong>
+              <em>{numberFormat(percent)}%</em>
+            </div>
+          );
+        })}
+    </div>
+  );
+}
+
+function CategoryPayerBarShape({
+  x,
+  y,
+  width,
+  height,
+  payload,
+  users
+}: {
+  x?: number | string;
+  y?: number | string;
+  width?: number | string;
+  height?: number | string;
+  payload?: CategoryPayerChartRow;
+  users: User[];
+}) {
+  const barX = Number(x ?? 0);
+  const barY = Number(y ?? 0);
+  const barWidth = Number(width ?? 0);
+  const barHeight = Number(height ?? 0);
+  const total = payload?.visibleTotal ?? 0;
+  if (!payload || total <= 0 || barWidth <= 0 || barHeight <= 0) return null;
+
+  let nextY = barY + barHeight;
+  const visibleSegments = payload.byUser.filter((payer) => payer.visibleAmount > 0);
+  return (
+    <g data-testid="category-consumption-bar">
+      {visibleSegments.map((payer, index) => {
+        const segmentHeight = index === visibleSegments.length - 1
+          ? nextY - barY
+          : Math.max(1, (barHeight * payer.visibleAmount) / total);
+        nextY -= segmentHeight;
+        return (
+          <rect
+            key={payer.userId}
+            x={barX}
+            y={nextY}
+            width={barWidth}
+            height={segmentHeight}
+            fill={payerColor(payer.userId, users)}
+            rx={index === visibleSegments.length - 1 ? 5 : 0}
+          />
+        );
+      })}
+    </g>
+  );
+}
+
+function CategoryTotalLabel({
+  x,
+  y,
+  width,
+  value
+}: {
+  x?: number | string;
+  y?: number | string;
+  width?: number | string;
+  value?: string | number;
+}) {
+  if (value === undefined || value === null) return null;
+  const labelX = Number(x ?? 0) + Number(width ?? 0) / 2;
+  const labelY = Number(y ?? 0) - 9;
+  return (
+    <text x={labelX} y={labelY} textAnchor="middle" className="bar-total-label">
+      {money(Number(value))}
+    </text>
+  );
+}
+
+function CategoryAxisTick({
+  x,
+  y,
+  payload
+}: {
+  x?: number;
+  y?: number;
+  payload?: { value?: string };
+}) {
+  const label = String(payload?.value ?? "");
+  const words = label.split(/\s+/);
+  const lines = words.reduce<string[]>((acc, word) => {
+    const last = acc[acc.length - 1] ?? "";
+    if (!last || `${last} ${word}`.length > 15) acc.push(word);
+    else acc[acc.length - 1] = `${last} ${word}`;
+    return acc;
+  }, []).slice(0, 3);
+  return (
+    <text x={x} y={y} textAnchor="middle" fill="#94a3b8" fontSize={12}>
+      {lines.map((line, index) => (
+        <tspan key={`${line}-${index}`} x={x} dy={index === 0 ? 14 : 15}>
+          {line}
+        </tspan>
+      ))}
+    </text>
+  );
+}
+
+function PayerLegend({ users, userIds }: { users: User[]; userIds: number[] }) {
+  if (!userIds.length) return null;
+  return (
+    <div className="chart-legend payer-legend" aria-label="Leyenda de pagadores">
+      {userIds.map((userId) => (
+        <span key={userId}>
+          <i style={{ background: payerColor(userId, users) }} />
+          {payerName(userId, users)}
+        </span>
+      ))}
     </div>
   );
 }

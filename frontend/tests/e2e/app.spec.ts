@@ -4,6 +4,43 @@ test.beforeEach(async ({ request }) => {
   await request.post("http://127.0.0.1:8000/test/reset");
 });
 
+test("dashboard renders category consumption chart by payer", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Resumen de consumos" })).toBeVisible();
+  const monthlyChart = page.getByTestId("monthly-chart-panel");
+  await expect(monthlyChart.getByTestId("monthly-total-label").first()).toBeVisible();
+  const monthlyTotalLabels = await monthlyChart.getByTestId("monthly-total-label").count();
+  expect(monthlyTotalLabels).toBeGreaterThan(0);
+  expect(monthlyTotalLabels).toBeLessThan(12);
+  await expect(page.locator(".dashboard-grid h2").nth(2)).toHaveText("Consumos por categoria");
+  await expect(page.locator(".dashboard-grid h2").nth(3)).toHaveText("Proyeccion recurrente");
+
+  const categoryConsumptionChart = page.getByTestId("category-consumption-chart-panel");
+  await expect(categoryConsumptionChart.getByLabel(/Mes /).last()).toBeChecked();
+  await expect(categoryConsumptionChart.getByText(/\$\s*[0-9]/).first()).toBeVisible();
+  await expect(categoryConsumptionChart.getByLabel("Leyenda de pagadores")).toBeVisible();
+
+  await categoryConsumptionChart.locator("[data-testid='category-consumption-bar']").first().hover({ force: true });
+  await expect(page.getByRole("tooltip")).toContainText("%");
+
+  const secondarySections = [
+    ["cumulative-section", /Consumo acumulado/],
+    ["category-average-section", "Promedio mensual por categoria"],
+    ["category-variation-section", /Variacion mensual por categoria/]
+  ] as const;
+  for (const [testId, title] of secondarySections) {
+    const section = page.getByTestId(testId);
+    await expect(section.getByRole("heading", { name: title })).toBeVisible();
+    await expect(section.getByRole("button", { name: /Expandir/ })).toHaveAttribute("aria-expanded", "false");
+  }
+
+  const cumulativeSection = page.getByTestId("cumulative-section");
+  await cumulativeSection.getByRole("button", { name: /Expandir Consumo acumulado/ }).click();
+  await expect(cumulativeSection.getByRole("button", { name: /Colapsar Consumo acumulado/ })).toHaveAttribute("aria-expanded", "true");
+  await cumulativeSection.getByRole("button", { name: /Colapsar Consumo acumulado/ }).click();
+  await expect(cumulativeSection.getByRole("button", { name: /Expandir Consumo acumulado/ })).toHaveAttribute("aria-expanded", "false");
+});
+
 test("core bills workflow renders and supports import review", async ({ page, request }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Resumen de consumos" })).toBeVisible();
@@ -150,6 +187,50 @@ test("expense month groups can be collapsed while searching and after clearing s
   await page.getByRole("button", { name: /Expandir todos/ }).click();
   await page.getByRole("button", { name: /Colapsar todos/ }).click();
   await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
+});
+
+test("dashboard category average table shows current month and final columns", async ({ page, request }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Carga de Resumenes" }).click();
+  await page.getByLabel("Elegir resumen de tarjeta PDF").setInputFiles("../tests/fixtures/bbva_visa_sanitized.pdf");
+  await expect(page.getByText("Lineas detectadas")).toBeVisible();
+  await page.getByRole("button", { name: /Procesar/ }).click();
+  await expect(page.locator("[data-testid^='active-import-']")).toHaveCount(0);
+
+  const categoriesResponse = await request.get("http://127.0.0.1:8000/households/1/categories", {
+    headers: { "X-Test-User-Email": "mauro@example.test" }
+  });
+  expect(categoriesResponse.ok()).toBeTruthy();
+  const categories = await categoriesResponse.json() as Array<{ id: number; name: string }>;
+  const services = categories.find((category) => category.name === "Servicios");
+  expect(services).toBeTruthy();
+  const currentDate = new Date();
+  const currentMonthDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-06`;
+  await request.post("http://127.0.0.1:8000/households/1/expenses", {
+    headers: { "X-Test-User-Email": "mauro@example.test" },
+    data: {
+      date: currentMonthDate,
+      description: "Gasto mes en curso promedio",
+      category_id: services!.id,
+      paid_by_user_id: 1,
+      currency: "ARS",
+      original_amount: "12345.00",
+      source: "manual"
+    }
+  });
+
+  await page.getByRole("button", { name: "Resumen", exact: true }).click();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Resumen de consumos" })).toBeVisible();
+  const averageSection = page.getByTestId("category-average-section");
+  await averageSection.getByRole("button", { name: /Expandir Promedio mensual por categoria/ }).click();
+  await expect(averageSection.getByRole("button", { name: "Mes en curso" })).toBeVisible();
+  await expect(averageSection.getByText("(3 meses)")).toHaveCount(0);
+  await expect(averageSection.getByText("Promedio anual")).toHaveCount(0);
+  const servicesAverageRow = averageSection.locator("tbody tr").filter({ hasText: "Servicios" });
+  await expect(servicesAverageRow).toContainText("$ 12.345");
+  await averageSection.getByRole("button", { name: "Mes en curso" }).click();
+  await expect(averageSection.getByRole("button", { name: "Mes en curso ↓" })).toBeVisible();
 });
 
 test("processing all selected card lines clears that import from pending imports", async ({ page, request }) => {

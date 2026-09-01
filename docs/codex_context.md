@@ -1,8 +1,8 @@
 # Codex Context - Spent Analyzer
 
-Last updated: 2026-07-08
+Last updated: 2026-09-01
 
-Use this file as the compact handoff context for future Codex threads. Start new work by reading this file, then inspect only the files relevant to the requested task.
+Use this file as the compact handoff context for future Codex threads. Start new work by reading this file, then inspect only the files relevant to the requested task. Update this file when a feature or fix changes durable product behavior, data contracts, workflow rules, testing expectations, or operational knowledge that future Codex threads should inherit.
 
 ## Project Goal
 
@@ -472,10 +472,11 @@ Dashboard focus is consumption over time.
 Current order:
 1. Filtros
 2. Consumo mensual current year
-3. Proyeccion recurrente
-4. Consumo acumulado current year
-5. Promedio mensual por categoria
-6. Variacion mensual por categoria
+3. Consumos por categoria
+4. Proyeccion recurrente
+5. Consumo acumulado current year
+6. Promedio mensual por categoria
+7. Variacion mensual por categoria
 
 Dashboard filters:
 - household/all users or individual payer
@@ -486,16 +487,18 @@ Dashboard filters:
 Charts:
 - legends should use consistent category colors and order
 - clicking a legend category highlights that category across charts
+- `Consumo mensual` is a stacked category bar chart and shows the visible-category monthly total centered above each non-empty month bar, formatted with the app currency formatter.
 - stacked monthly chart tooltips should show only the hovered category/amount
 - avoid the default Recharts white translucent cursor overlay
+- `Consumos por categoria` is a vertical bar chart immediately after `Consumo mensual`. It uses `amount_ars`, respects the global payer/category filters and non-consumption rules, defaults its own month selector to the latest available month in the filtered dashboard data, allows multiple selected months, sums selected months into one bar per category, orders categories by total descending, stacks each category bar by `paid_by_user_id`, shows a payer legend, always shows the formatted category total above each bar, and keeps labels legible with horizontal scroll/minimum category width on narrow or high-cardinality views.
 - Card statement imports have a `statement_period` (`YYYY-MM`) that represents the statement month, separate from individual transaction dates.
 - For BBVA card statements, infer `statement_period` from `VENCIMIENTO ACTUAL`: if due date is before day 25, use the previous calendar month; otherwise use the due-date month. The import review UI lets the user override it.
 - Import history and dashboard statement coverage for card statements must use `statement_period`, not transaction months. This prevents a June statement with a few July-dated transactions from marking July as loaded.
-- `Promedio mensual por categoria` uses the latest covered card statement period for the current dashboard filter. In household view, the latest period is the latest month common to all household members with loaded card summaries; when filtering a person, use that person's latest loaded period.
+- `Promedio mensual por categoria` is collapsed by default in the dashboard. It uses the latest covered card statement period for the current dashboard filter. In household view, the latest period is the latest month common to all household members with loaded card summaries; when filtering a person, use that person's latest loaded period.
 - Average columns include only months whose card statement period is loaded/covered for the current dashboard filter. Within those covered months, category values of 0 are real data and must be included in the divisor. Example: latest 3 covered months May=0, April=350k, March=20k => average is 370k / 3.
-- The annual average uses the prior calendar year and only months from that year that are loaded/covered for the current dashboard filter, including zero category values for covered months.
-- `Promedio mensual por categoria` has sortable columns and defaults to `Promedio mensual (6 meses)` descending. Headers for the latest month and rolling averages are displayed on two lines, e.g. `Promedio mensual` / `(3 meses)` and `Ultimo mes` / `(2026-06 (Junio))`.
-- `Variacion mensual por categoria` compares each loaded month in the visible year against the average of up to the previous 3 loaded months in that same visible year. Zero category values in loaded months count in the average; unloaded months are excluded.
+- `Promedio mensual por categoria` shows only `Categoria`, `Mes en curso`, `Ultimo mes`, and `Promedio mensual (6 meses)`, in that order. `Mes en curso` is the accumulated consumption in the current calendar month and respects the dashboard global filters and existing consumption rules. `Ultimo mes` and `Promedio mensual (6 meses)` preserve their prior covered-card-period semantics.
+- `Promedio mensual por categoria` has sortable columns and defaults to `Promedio mensual (6 meses)` descending. Headers for the latest month and rolling average are displayed on two lines, e.g. `Promedio mensual` / `(6 meses)` and `Ultimo mes` / `(2026-06 (Junio))`.
+- `Consumo acumulado` and `Variacion mensual por categoria` are also collapsed by default in the dashboard. `Variacion mensual por categoria` compares each loaded month in the visible year against the average of up to the previous 3 loaded months in that same visible year. Zero category values in loaded months count in the average; unloaded months are excluded.
 
 Expenses page:
 - group expenses by month/year
@@ -523,7 +526,7 @@ Unit tests cover:
 - BBVA card parser normalization and multi-cardholder sections
 - BBVA account parser classification
 - import commit accounting, rejected lines, reimbursements, recurring offsets
-- dashboard recurring projection behavior
+- dashboard recurring projection behavior and category-by-payer dashboard aggregation
 - merchant learning
 - receipt AI/local parsing
 - Jumbo receipt parser
@@ -531,6 +534,7 @@ Unit tests cover:
 E2E/visual tests cover:
 - test-mode login/reset
 - dashboard render and filters
+- dashboard category consumption chart render, default latest-month selection, payer legend, visible totals, and tooltip detail
 - expenses CRUD/search/sort
 - card import review
 - pending import deletion
@@ -555,6 +559,8 @@ When changing dashboard recurring, also run:
 docker compose -f docker-compose.test.yml run --rm test-runner bash -lc "python -m unittest tests.unit.test_dashboard_recurring"
 ```
 
+When changing dashboard chart UI, run the dashboard unit tests, a targeted Playwright dashboard test, and the frontend build. The Playwright dashboard tests require test auth in the Vite app, for example `VITE_TEST_USER_EMAIL=mauro@example.test`.
+
 When changing frontend broadly, run:
 
 ```powershell
@@ -568,7 +574,7 @@ To reduce token usage:
 - Paste or reference only this file plus the specific user request.
 - Ask Codex to inspect current files before editing, because the worktree may be dirty.
 - Avoid pasting long previous conversations. Put durable decisions here instead.
-- Keep new decisions in this file when they affect future work.
+- Keep new decisions in this file when they affect future work, especially after adding a feature, changing product semantics, changing API response shape, or discovering a test/runtime detail that future work should not rediscover.
 - Prefer targeted tests first, then full container tests when a larger workflow changed.
 
 Important safety:

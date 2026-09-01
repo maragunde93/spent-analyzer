@@ -241,6 +241,29 @@ class DashboardRecurringTests(unittest.TestCase):
         self.assertEqual(household_result.card_statement_periods, ["2026-05", "2026-06"])
         self.assertEqual(mauro_result.card_statement_periods, ["2026-05", "2026-06"])
 
+    def test_category_monthly_by_payer_orders_categories_and_respects_filters(self):
+        self._expense(date(2026, 5, 3), "Aysa", self.services.id, self.water.id, Decimal("100000.00"), False, paid_by_user_id=self.user.id)
+        self._expense(date(2026, 5, 4), "Edesur", self.services.id, self.electricity.id, Decimal("70000.00"), False, paid_by_user_id=self.other_user.id)
+        self._expense(date(2026, 5, 5), "Reintegro servicios", self.services.id, self.water.id, Decimal("-20000.00"), False, paid_by_user_id=self.user.id)
+        self._expense(date(2026, 5, 6), "Streaming", self.subscriptions.id, None, Decimal("45000.00"), False, paid_by_user_id=self.other_user.id)
+        self._expense(date(2026, 6, 2), "Internet", self.services.id, None, Decimal("60000.00"), False, paid_by_user_id=self.user.id)
+        self.db.commit()
+
+        result = dashboard(self.home.id, category_ids=[self.services.id], user=self.user, db=self.db)
+
+        self.assertEqual([row["period"] for row in result.monthly_category_by_payer], ["2026-05", "2026-06"])
+        may = result.monthly_category_by_payer[0]
+        self.assertEqual(may["categories"][0]["name"], "Servicios")
+        self.assertEqual(may["categories"][0]["total_amount_ars"], Decimal("150000.00"))
+        self.assertEqual(
+            may["categories"][0]["by_user"],
+            [
+                {"user_id": self.user.id, "amount_ars": Decimal("80000.00")},
+                {"user_id": self.other_user.id, "amount_ars": Decimal("70000.00")},
+            ],
+        )
+        self.assertNotIn("Suscripciones", [category["name"] for category in may["categories"]])
+
     def _expense(
         self,
         expense_date: date,
