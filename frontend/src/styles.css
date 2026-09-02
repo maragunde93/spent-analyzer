@@ -1362,6 +1362,35 @@ button.person-action-control:disabled {
   color: #f8fafc;
   overflow-wrap: anywhere;
 }
+.mp-row {
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.mp-row-heading,
+.mp-actions,
+.mp-meta {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+.mp-row-heading {
+  justify-content: space-between;
+}
+.mp-meta {
+  color: #94a3b8;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.mp-actions {
+  flex-wrap: wrap;
+}
+.mp-actions input {
+  flex: 1 1 280px;
+  min-width: 0;
+}
 .profile-panel {
   align-content: start;
 }

@@ -31,7 +31,7 @@ import {
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Customized, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, apiFallbacksEnabled } from "./api";
 import { categories as fallbackCategories, users as fallbackUsers } from "./mockData";
-import type { Category, Currency, DashboardSummary, Expense, ExpenseSource, ImportBatch, ImportLine, ReceiptImport, ReceiptItem, User } from "./types";
+import type { Category, Currency, DashboardSummary, Expense, ExpenseSource, ImportBatch, ImportLine, MercadoPagoIntegration, ReceiptImport, ReceiptItem, User } from "./types";
 
 function money(value: string | number, currency = "ARS") {
   return new Intl.NumberFormat("es-AR", {
@@ -2849,7 +2849,9 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
   const [subcategoryName, setSubcategoryName] = useState("");
   const [editingSubcategoryId, setEditingSubcategoryId] = useState<number | null>(null);
   const [editSubcategoryName, setEditSubcategoryName] = useState("");
+  const [mpTokenByUser, setMpTokenByUser] = useState<Record<number, string>>({});
   const queryClient = useQueryClient();
+  const mercadoPago = useQuery({ queryKey: ["mercadopago", homeId], queryFn: () => api.mercadoPagoIntegrations(homeId) });
   const selectedSubcategoryCategory = categories.find((category) => category.id === selectedSubcategoryCategoryId) ?? categories[0];
   const updateMember = useMutation({
     mutationFn: ({ id, nextName, nextEmail }: { id: number; nextName: string; nextEmail: string }) =>
@@ -2934,6 +2936,32 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
       queryClient.invalidateQueries({ queryKey: ["history", homeId] });
     }
   });
+  const connectMercadoPago = useMutation({
+    mutationFn: ({ userId, accessToken }: { userId: number; accessToken: string }) => api.connectMercadoPago(homeId, userId, accessToken),
+    onSuccess: (_, variables) => {
+      setMpTokenByUser((current) => ({ ...current, [variables.userId]: "" }));
+      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  const syncMercadoPago = useMutation({
+    mutationFn: (userId: number) => api.syncMercadoPago(homeId, userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  const disconnectMercadoPago = useMutation({
+    mutationFn: (userId: number) => api.disconnectMercadoPago(homeId, userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  const mercadoPagoByUser = new Map((mercadoPago.data ?? []).map((integration) => [integration.user_id, integration]));
   return (
     <section className="grid two">
       <div className="panel">
@@ -3012,6 +3040,72 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
         </div>
         {updateMember.isError && <p className="form-error settings-error">No se pudo editar el usuario. Revisá que el mail no este repetido.</p>}
         {deleteMember.isError && <p className="form-error settings-error">No se pudo eliminar el usuario. Solo se pueden borrar usuarios sin consumos asociados.</p>}
+      </div>
+      <div className="panel wide">
+        <h2>Mercado Pago</h2>
+        <div className="stack">
+          {users.map((user) => {
+            const integration = mercadoPagoByUser.get(user.id);
+            const tokenValue = mpTokenByUser[user.id] ?? "";
+            return (
+              <div className="mp-row" key={user.id}>
+                <div className="mp-row-heading">
+                  <div className="member-name">
+                    <strong>{user.display_name}</strong>
+                    <small>{mercadoPagoStatus(integration)}</small>
+                  </div>
+                  <span className={integration?.connected ? "status" : "status warning-status"}>
+                    {integration?.connected ? "Conectado" : "No conectado"}
+                  </span>
+                </div>
+                <div className="mp-meta">
+                  <span>Cuenta: {integration?.mp_nickname || integration?.mp_user_id || "Sin identificar"}</span>
+                  <span>Ultima sync: {integration?.last_sync_at ? new Date(integration.last_sync_at).toLocaleString("es-AR") : "Nunca"}</span>
+                  {integration?.last_report_file_name && <span>Reporte: {integration.last_report_file_name}</span>}
+                </div>
+                {integration?.last_sync_error && <div className="warning">Ultimo error: {integration.last_sync_error}</div>}
+                <div className="mp-actions">
+                  <input
+                    type="password"
+                    value={tokenValue}
+                    placeholder={integration?.connected ? "Reemplazar Access Token" : "Access Token"}
+                    aria-label={`Access Token Mercado Pago ${user.display_name}`}
+                    onChange={(event) => setMpTokenByUser((current) => ({ ...current, [user.id]: event.target.value }))}
+                  />
+                  <button
+                    className="primary"
+                    disabled={tokenValue.trim().length < 10 || connectMercadoPago.isPending}
+                    onClick={() => connectMercadoPago.mutate({ userId: user.id, accessToken: tokenValue.trim() })}
+                  >
+                    <WalletCards size={16} /> {integration?.connected ? "Reemplazar" : "Conectar"}
+                  </button>
+                  <button
+                    disabled={!integration?.connected || syncMercadoPago.isPending}
+                    onClick={() => syncMercadoPago.mutate(user.id)}
+                  >
+                    <CalendarClock size={16} /> Sincronizar ahora
+                  </button>
+                  <button
+                    className="icon-button danger"
+                    title="Desconectar Mercado Pago"
+                    aria-label={`Desconectar Mercado Pago ${user.display_name}`}
+                    disabled={!integration?.connected || disconnectMercadoPago.isPending}
+                    onClick={() => {
+                      if (window.confirm(`Desconectar Mercado Pago de "${user.display_name}"? Se elimina el token guardado.`)) {
+                        disconnectMercadoPago.mutate(user.id);
+                      }
+                    }}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {connectMercadoPago.isError && <p className="form-error settings-error">No se pudo validar el token de Mercado Pago.</p>}
+        {syncMercadoPago.isError && <p className="form-error settings-error">No se pudo sincronizar Mercado Pago. Revisá el ultimo error de la cuenta.</p>}
+        {disconnectMercadoPago.isError && <p className="form-error settings-error">No se pudo desconectar Mercado Pago.</p>}
       </div>
       <div className="panel">
         <h2>Categorias</h2>
@@ -3172,7 +3266,14 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
 }
 
 function sourceLabel(source: ExpenseSource) {
-  return { manual: "Manual", import_pdf: "Credito", bank_import: "Cuenta", cash: "Efectivo", transfer: "Transferencia", other: "Otro" }[source];
+  return { manual: "Manual", import_pdf: "Credito", bank_import: "Cuenta", mercadopago: "Mercado Pago", cash: "Efectivo", transfer: "Transferencia", other: "Otro" }[source];
+}
+
+function mercadoPagoStatus(integration?: MercadoPagoIntegration) {
+  if (!integration?.connected) return "Sin token guardado";
+  if (integration.last_sync_status === "error") return "Con error";
+  if (integration.last_sync_status === "ok") return "Sincronizada";
+  return "Token validado";
 }
 
 function kindLabel(kind: string) {
@@ -3221,6 +3322,9 @@ function actionLabel(action: string) {
     import_upload: "Statement cargado",
     import_commit: "Importacion procesada",
     import_delete: "Importacion borrada",
+    mercadopago_connect: "Mercado Pago conectado",
+    mercadopago_disconnect: "Mercado Pago desconectado",
+    mercadopago_sync: "Mercado Pago sincronizado",
     cash_create: "Efectivo creado",
     cash_adjust: "Efectivo ajustado",
     category_create: "Categoria creada",

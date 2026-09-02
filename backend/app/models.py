@@ -43,6 +43,26 @@ class Membership(Base):
     home_group: Mapped[HomeGroup] = relationship(back_populates="memberships")
 
 
+class MercadoPagoIntegration(Base):
+    __tablename__ = "mercadopago_integrations"
+    __table_args__ = (UniqueConstraint("home_group_id", "user_id", name="uq_mp_integration_home_user"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    mp_user_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    mp_nickname: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    mp_site_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    access_token: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_sync_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    last_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_report_file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Category(Base):
     __tablename__ = "categories"
     __table_args__ = (UniqueConstraint("home_group_id", "name", name="uq_category_home_name"),)

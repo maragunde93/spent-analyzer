@@ -1,5 +1,5 @@
 export type Currency = "ARS" | "USD";
-export type ExpenseSource = "manual" | "import_pdf" | "bank_import" | "cash" | "transfer" | "other";
+export type ExpenseSource = "manual" | "import_pdf" | "bank_import" | "mercadopago" | "cash" | "transfer" | "other";
 
 export type Category = {
   id: number;
@@ -27,6 +27,28 @@ export type User = {
 export type HomeGroup = {
   id: number;
   name: string;
+};
+
+export type MercadoPagoIntegration = {
+  user_id: number;
+  connected: boolean;
+  enabled: boolean;
+  mp_user_id: string | null;
+  mp_nickname: string | null;
+  mp_site_id: string | null;
+  last_sync_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+  last_report_file_name: string | null;
+  updated_at: string | null;
+};
+
+export type MercadoPagoSyncResult = {
+  batch_id: number | null;
+  report_file_name: string;
+  imported: number;
+  ignored: number;
+  duplicates: number;
 };
 
 export type Expense = {

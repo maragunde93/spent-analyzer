@@ -16,7 +16,7 @@ depends_on = None
 
 def upgrade() -> None:
     currency = sa.Enum("ARS", "USD", name="currency")
-    expense_source = sa.Enum("manual", "import_pdf", "bank_import", "cash", "transfer", "other", name="expensesource")
+    expense_source = sa.Enum("manual", "import_pdf", "bank_import", "mercadopago", "cash", "transfer", "other", name="expensesource")
     import_line_kind = sa.Enum(
         "purchase",
         "refund",
@@ -84,6 +84,27 @@ def upgrade() -> None:
     )
     op.create_index(op.f("ix_subcategories_home_group_id"), "subcategories", ["home_group_id"], unique=False)
     op.create_index(op.f("ix_subcategories_category_id"), "subcategories", ["category_id"], unique=False)
+
+    op.create_table(
+        "mercadopago_integrations",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("home_group_id", sa.Integer(), sa.ForeignKey("home_groups.id"), nullable=False),
+        sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id"), nullable=False),
+        sa.Column("mp_user_id", sa.String(length=80), nullable=True),
+        sa.Column("mp_nickname", sa.String(length=160), nullable=True),
+        sa.Column("mp_site_id", sa.String(length=20), nullable=True),
+        sa.Column("access_token", sa.Text(), nullable=False),
+        sa.Column("enabled", sa.Boolean(), nullable=False),
+        sa.Column("last_sync_at", sa.DateTime(), nullable=True),
+        sa.Column("last_sync_status", sa.String(length=40), nullable=True),
+        sa.Column("last_sync_error", sa.Text(), nullable=True),
+        sa.Column("last_report_file_name", sa.String(length=255), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.UniqueConstraint("home_group_id", "user_id", name="uq_mp_integration_home_user"),
+    )
+    op.create_index(op.f("ix_mercadopago_integrations_home_group_id"), "mercadopago_integrations", ["home_group_id"], unique=False)
+    op.create_index(op.f("ix_mercadopago_integrations_user_id"), "mercadopago_integrations", ["user_id"], unique=False)
 
     op.create_table(
         "merchants",
@@ -286,6 +307,9 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_import_batches_home_group_id"), table_name="import_batches")
     op.drop_table("import_batches")
     op.drop_table("merchants")
+    op.drop_index(op.f("ix_mercadopago_integrations_user_id"), table_name="mercadopago_integrations")
+    op.drop_index(op.f("ix_mercadopago_integrations_home_group_id"), table_name="mercadopago_integrations")
+    op.drop_table("mercadopago_integrations")
     op.drop_index(op.f("ix_subcategories_category_id"), table_name="subcategories")
     op.drop_index(op.f("ix_subcategories_home_group_id"), table_name="subcategories")
     op.drop_table("subcategories")

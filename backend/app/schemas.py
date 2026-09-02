@@ -33,6 +33,33 @@ class MemberUpdate(BaseModel):
     display_name: str = Field(max_length=120)
 
 
+class MercadoPagoIntegrationRead(BaseModel):
+    user_id: int
+    connected: bool
+    enabled: bool = False
+    mp_user_id: str | None = None
+    mp_nickname: str | None = None
+    mp_site_id: str | None = None
+    last_sync_at: str | None = None
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
+    last_report_file_name: str | None = None
+    updated_at: str | None = None
+
+
+class MercadoPagoTokenUpdate(BaseModel):
+    access_token: str = Field(min_length=10, max_length=5000)
+    enabled: bool = True
+
+
+class MercadoPagoSyncRead(BaseModel):
+    batch_id: int | None = None
+    report_file_name: str
+    imported: int
+    ignored: int
+    duplicates: int
+
+
 class SubcategoryRead(BaseModel):
     id: int
     category_id: int

@@ -459,6 +459,87 @@ test("house settings allow creating, editing, and deleting subcategories without
   expect(expense!.subcategory_id).toBeNull();
 });
 
+test("house settings manage Mercado Pago integration with mocked API", async ({ page }) => {
+  let connected = false;
+  await page.route("**/households/1/mercadopago/integrations", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          user_id: 1,
+          connected,
+          enabled: connected,
+          mp_user_id: connected ? "123456" : null,
+          mp_nickname: connected ? "mauro-mp" : null,
+          mp_site_id: connected ? "MLA" : null,
+          last_sync_at: connected ? "2026-08-28T12:00:00" : null,
+          last_sync_status: connected ? "ok" : null,
+          last_sync_error: null,
+          last_report_file_name: connected ? "settlement-report-test.csv" : null,
+          updated_at: connected ? "2026-08-28T12:00:00" : null
+        },
+        {
+          user_id: 2,
+          connected: false,
+          enabled: false,
+          mp_user_id: null,
+          mp_nickname: null,
+          mp_site_id: null,
+          last_sync_at: null,
+          last_sync_status: null,
+          last_sync_error: null,
+          last_report_file_name: null,
+          updated_at: null
+        }
+      ])
+    });
+  });
+  await page.route("**/households/1/mercadopago/integrations/1", async (route) => {
+    if (route.request().method() === "PUT") {
+      connected = true;
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          user_id: 1,
+          connected: true,
+          enabled: true,
+          mp_user_id: "123456",
+          mp_nickname: "mauro-mp",
+          mp_site_id: "MLA",
+          last_sync_at: null,
+          last_sync_status: "connected",
+          last_sync_error: null,
+          last_report_file_name: null,
+          updated_at: "2026-08-28T12:00:00"
+        })
+      });
+      return;
+    }
+    connected = false;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.route("**/households/1/mercadopago/integrations/1/sync", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ batch_id: 9, report_file_name: "settlement-report-test.csv", imported: 4, ignored: 1, duplicates: 0 })
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Casa" }).click();
+  await expect(page.getByRole("heading", { name: "Mercado Pago" })).toBeVisible();
+  await page.getByLabel("Access Token Mercado Pago Mauro").fill("APP_USR-valid-token");
+  await page.getByRole("button", { name: "Conectar" }).first().click();
+  await expect(page.getByText("mauro-mp")).toBeVisible();
+  await expect(page.getByText("settlement-report-test.csv")).toBeVisible();
+  await page.getByRole("button", { name: "Sincronizar ahora" }).first().click();
+  page.once("dialog", async (dialog) => {
+    await dialog.accept();
+  });
+  await page.getByLabel("Desconectar Mercado Pago Mauro").click();
+  await expect(page.getByText("No conectado").first()).toBeVisible();
+});
+
 test("receipt lab parses a Jumbo OCR text ticket without creating a duplicate expense", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Tickets" }).click();

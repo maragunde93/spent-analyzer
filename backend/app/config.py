@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     fx_auto_update_enabled: bool = False
     fx_api_url: str = "https://dolarapi.com/v1/dolares/blue"
     fx_update_hour_argentina: int = 11
+    mercadopago_auto_sync_enabled: bool = True
+    mercadopago_api_base_url: str = "https://api.mercadopago.com"
+    mercadopago_identity_base_url: str = "https://api.mercadolibre.com"
+    mercadopago_sync_hour_argentina: int = 4
+    mercadopago_sync_overlap_days: int = 3
+    mercadopago_report_poll_interval_seconds: float = 10.0
+    mercadopago_report_poll_timeout_seconds: float = 180.0
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="SPENT_")
 

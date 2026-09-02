@@ -41,6 +41,7 @@ def ensure_incremental_schema() -> None:
                 connection.execute(text("ALTER TABLE expenses ADD COLUMN notes TEXT"))
             if "is_recurring" not in expense_columns:
                 connection.execute(text("ALTER TABLE expenses ADD COLUMN is_recurring BOOLEAN NOT NULL DEFAULT 0"))
+            _ensure_sqlite_mercadopago_schema(connection)
             import_batch_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(import_batches)"))}
             if "fx_rate_ars_per_usd" not in import_batch_columns:
                 connection.execute(text("ALTER TABLE import_batches ADD COLUMN fx_rate_ars_per_usd NUMERIC(14, 4)"))
@@ -77,6 +78,31 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS notes TEXT"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS mercadopago_integrations (
+                        id SERIAL PRIMARY KEY,
+                        home_group_id INTEGER NOT NULL REFERENCES home_groups(id),
+                        user_id INTEGER NOT NULL REFERENCES users(id),
+                        mp_user_id VARCHAR(80),
+                        mp_nickname VARCHAR(160),
+                        mp_site_id VARCHAR(20),
+                        access_token TEXT NOT NULL,
+                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        last_sync_at TIMESTAMP,
+                        last_sync_status VARCHAR(40),
+                        last_sync_error TEXT,
+                        last_report_file_name VARCHAR(255),
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        CONSTRAINT uq_mp_integration_home_user UNIQUE (home_group_id, user_id)
+                    )
+                    """
+                )
+            )
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_integrations_home_group_id ON mercadopago_integrations(home_group_id)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_integrations_user_id ON mercadopago_integrations(user_id)"))
             connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS fx_rate_ars_per_usd NUMERIC(14, 4)"))
             connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS statement_period VARCHAR(7)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
@@ -113,6 +139,34 @@ def _backfill_import_batch_fx_rates(connection) -> None:
             """
         )
     )
+
+
+def _ensure_sqlite_mercadopago_schema(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS mercadopago_integrations (
+                id INTEGER NOT NULL PRIMARY KEY,
+                home_group_id INTEGER NOT NULL REFERENCES home_groups(id),
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                mp_user_id VARCHAR(80),
+                mp_nickname VARCHAR(160),
+                mp_site_id VARCHAR(20),
+                access_token TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                last_sync_at DATETIME,
+                last_sync_status VARCHAR(40),
+                last_sync_error TEXT,
+                last_report_file_name VARCHAR(255),
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_mp_integration_home_user UNIQUE (home_group_id, user_id)
+            )
+            """
+        )
+    )
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_integrations_home_group_id ON mercadopago_integrations(home_group_id)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_integrations_user_id ON mercadopago_integrations(user_id)"))
 
 
 def _repair_bank_import_signs(connection) -> None:
@@ -195,6 +249,7 @@ def ensure_postgres_enums() -> None:
         connection.execute(text("ALTER TYPE expensesource ADD VALUE IF NOT EXISTS 'transfer'"))
         connection.execute(text("ALTER TYPE expensesource ADD VALUE IF NOT EXISTS 'other'"))
         connection.execute(text("ALTER TYPE expensesource ADD VALUE IF NOT EXISTS 'bank_import'"))
+        connection.execute(text("ALTER TYPE expensesource ADD VALUE IF NOT EXISTS 'mercadopago'"))
         connection.execute(text("ALTER TYPE importlinekind ADD VALUE IF NOT EXISTS 'debit_purchase'"))
         connection.execute(text("ALTER TYPE importlinekind ADD VALUE IF NOT EXISTS 'cash_withdrawal'"))
         connection.execute(text("ALTER TYPE importlinekind ADD VALUE IF NOT EXISTS 'card_payment'"))

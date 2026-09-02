@@ -10,6 +10,7 @@ class ExpenseSource(str, Enum):
     manual = "manual"
     import_pdf = "import_pdf"
     bank_import = "bank_import"
+    mercadopago = "mercadopago"
     cash = "cash"
     transfer = "transfer"
     other = "other"
