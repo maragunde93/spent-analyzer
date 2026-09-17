@@ -16,7 +16,7 @@ depends_on = None
 
 def upgrade() -> None:
     currency = sa.Enum("ARS", "USD", name="currency")
-    expense_source = sa.Enum("manual", "import_pdf", "bank_import", "cash", "transfer", "other", name="expensesource")
+    expense_source = sa.Enum("manual", "import_pdf", "bank_import", "mercadopago", "cash", "transfer", "other", name="expensesource")
     import_line_kind = sa.Enum(
         "purchase",
         "refund",
@@ -86,6 +86,34 @@ def upgrade() -> None:
     op.create_index(op.f("ix_subcategories_category_id"), "subcategories", ["category_id"], unique=False)
 
     op.create_table(
+        "mercadopago_integrations",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("home_group_id", sa.Integer(), sa.ForeignKey("home_groups.id"), nullable=False),
+        sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id"), nullable=False),
+        sa.Column("mp_user_id", sa.String(length=80), nullable=True),
+        sa.Column("mp_nickname", sa.String(length=160), nullable=True),
+        sa.Column("mp_site_id", sa.String(length=20), nullable=True),
+        sa.Column("access_token", sa.Text(), nullable=False),
+        sa.Column("enabled", sa.Boolean(), nullable=False),
+        sa.Column("last_sync_at", sa.DateTime(), nullable=True),
+        sa.Column("last_sync_status", sa.String(length=40), nullable=True),
+        sa.Column("last_sync_error", sa.Text(), nullable=True),
+        sa.Column("last_report_file_name", sa.String(length=255), nullable=True),
+        sa.Column("last_sync_started_at", sa.DateTime(), nullable=True),
+        sa.Column("last_sync_completed_at", sa.DateTime(), nullable=True),
+        sa.Column("last_sync_begin_date", sa.DateTime(), nullable=True),
+        sa.Column("last_sync_end_date", sa.DateTime(), nullable=True),
+        sa.Column("last_sync_imported", sa.Integer(), nullable=True),
+        sa.Column("last_sync_ignored", sa.Integer(), nullable=True),
+        sa.Column("last_sync_duplicates", sa.Integer(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.UniqueConstraint("home_group_id", "user_id", name="uq_mp_integration_home_user"),
+    )
+    op.create_index(op.f("ix_mercadopago_integrations_home_group_id"), "mercadopago_integrations", ["home_group_id"], unique=False)
+    op.create_index(op.f("ix_mercadopago_integrations_user_id"), "mercadopago_integrations", ["user_id"], unique=False)
+
+    op.create_table(
         "merchants",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("home_group_id", sa.Integer(), sa.ForeignKey("home_groups.id"), nullable=False),
@@ -96,6 +124,24 @@ def upgrade() -> None:
         sa.Column("is_recurring", sa.Boolean(), nullable=False),
         sa.UniqueConstraint("home_group_id", "normalized_name", name="uq_merchant_home_name"),
     )
+
+    op.create_table(
+        "mercadopago_merchant_rules",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("home_group_id", sa.Integer(), sa.ForeignKey("home_groups.id"), nullable=False),
+        sa.Column("merchant_key", sa.String(length=120), nullable=False),
+        sa.Column("collector_id", sa.String(length=80), nullable=True),
+        sa.Column("store_id", sa.String(length=80), nullable=True),
+        sa.Column("learned_description", sa.String(length=240), nullable=True),
+        sa.Column("has_category_override", sa.Boolean(), nullable=False),
+        sa.Column("category_id", sa.Integer(), sa.ForeignKey("categories.id"), nullable=True),
+        sa.Column("subcategory_id", sa.Integer(), sa.ForeignKey("subcategories.id"), nullable=True),
+        sa.Column("is_recurring", sa.Boolean(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.UniqueConstraint("home_group_id", "merchant_key", name="uq_mp_merchant_rule_home_key"),
+    )
+    op.create_index(op.f("ix_mercadopago_merchant_rules_home_group_id"), "mercadopago_merchant_rules", ["home_group_id"], unique=False)
 
     op.create_table(
         "import_batches",
@@ -132,6 +178,9 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=40), nullable=False),
         sa.Column("fingerprint", sa.String(length=128), nullable=False),
         sa.Column("raw_text", sa.Text(), nullable=False),
+        sa.Column("mercadopago_merchant_key", sa.String(length=120), nullable=True),
+        sa.Column("mercadopago_collector_id", sa.String(length=80), nullable=True),
+        sa.Column("mercadopago_store_id", sa.String(length=80), nullable=True),
         sa.UniqueConstraint("home_group_id", "fingerprint", name="uq_import_line_fingerprint"),
     )
     op.create_index(op.f("ix_import_lines_home_group_id"), "import_lines", ["home_group_id"], unique=False)
@@ -285,7 +334,12 @@ def downgrade() -> None:
     op.drop_table("import_lines")
     op.drop_index(op.f("ix_import_batches_home_group_id"), table_name="import_batches")
     op.drop_table("import_batches")
+    op.drop_index(op.f("ix_mercadopago_merchant_rules_home_group_id"), table_name="mercadopago_merchant_rules")
+    op.drop_table("mercadopago_merchant_rules")
     op.drop_table("merchants")
+    op.drop_index(op.f("ix_mercadopago_integrations_user_id"), table_name="mercadopago_integrations")
+    op.drop_index(op.f("ix_mercadopago_integrations_home_group_id"), table_name="mercadopago_integrations")
+    op.drop_table("mercadopago_integrations")
     op.drop_index(op.f("ix_subcategories_category_id"), table_name="subcategories")
     op.drop_index(op.f("ix_subcategories_home_group_id"), table_name="subcategories")
     op.drop_table("subcategories")

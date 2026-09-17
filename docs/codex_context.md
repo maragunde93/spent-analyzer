@@ -1,12 +1,12 @@
 # Codex Context - Spent Analyzer
 
-Last updated: 2026-07-08
+Last updated: 2026-09-17
 
-Use this file as the compact handoff context for future Codex threads. Start new work by reading this file, then inspect only the files relevant to the requested task.
+Use this file as the compact handoff context for future Codex threads. Start new work by reading this file, then inspect only the files relevant to the requested task. Update this file when a feature or fix changes durable product behavior, data contracts, workflow rules, testing expectations, or operational knowledge that future Codex threads should inherit.
 
 ## Project Goal
 
-Spent Analyzer is a Spanish-first, dark-theme homelab finance app for household spending. The first release is bills/expenses-first, with manual expenses, BBVA card PDF import, BBVA account XLS import, receipt/ticket parsing, cash wallet tracking, dashboard analytics, recurring projections, categories/subcategories, and test auth for local use.
+Spent Analyzer is a Spanish-first, dark-theme homelab finance app for household spending. The first release is bills/expenses-first, with manual expenses, BBVA card PDF import, BBVA account XLS import, Mercado Pago account synchronization, receipt/ticket parsing, cash wallet tracking, dashboard analytics, recurring projections, categories/subcategories, and test auth for local use.
 
 The app is meant to run in a mini PC homelab behind an internal reverse proxy. Production auth is local username/password over the homelab HTTPS proxy; test auth remains available only for development and Playwright.
 
@@ -28,6 +28,9 @@ Important files:
 - Expenses API: `backend/app/api/expenses.py`
 - Imports API: `backend/app/api/imports.py`
 - Dashboard API: `backend/app/api/dashboard.py`
+- Mercado Pago API: `backend/app/api/mercadopago.py`
+- Mercado Pago sync/client/parser: `backend/app/services/mercadopago.py`
+- Mercado Pago standalone diagnostic: `backend/app/scripts/mercadopago_poc.py`
 - Receipts API: `backend/app/api/receipts.py`
 - BBVA card parser: `backend/app/services/bbva_parser.py`
 - BBVA account parser: `backend/app/services/bbva_account_parser.py`
@@ -141,6 +144,60 @@ Primary files:
 Tests:
 - expense CRUD/filter unit or integration tests under `tests/unit/`
 - expenses E2E flows in `frontend/tests/e2e/app.spec.ts`
+
+Special rule:
+- Deleting a Mercado Pago expense must also remove its unreferenced `ImportLine`. The importer also detects old stale fingerprints that no longer reference an expense or earning, removes them, and recreates the movement on the next sync. Do not simplify this into unconditional duplicate rejection.
+
+### Mercado Pago
+
+User phrase examples:
+- "Mercado Pago"
+- "sincronizar movimientos"
+- "settlement report"
+- "token de MP"
+- "duplicados de MP"
+
+Primary files:
+- `backend/app/api/mercadopago.py`
+- `backend/app/services/mercadopago.py`
+- `backend/app/models.py`
+- `backend/app/schemas.py`
+- `backend/app/api/expenses.py` for deletion/reimport behavior
+- `backend/app/main.py` for the daily scheduler lifecycle
+- `backend/app/config.py`
+- `frontend/src/App.tsx`
+- `frontend/src/api.ts`
+- `frontend/src/types.ts`
+- `.env.example`
+- `docker-compose.yml`
+- `docker-compose.prod.yml`
+- `docs/mercadopago_poc.md`
+
+Tests:
+- `tests/unit/test_mercadopago_sync.py`
+- Mercado Pago profile flow in `frontend/tests/e2e/app.spec.ts`
+- frontend build
+
+Durable behavior:
+- Integrations belong to a `(home_group_id, user_id)` pair; each user manages only their own token from Perfil, not Casa.
+- Integration listings expose only the current user's metadata. Connect, replace, sync, and disconnect operations enforce ownership in the backend.
+- Validate a token through Mercado Libre identity before saving it. Never return or log the raw token; HTTP debug logs must redact `Authorization`.
+- The settlement report configuration must exist and include all required columns before requesting a report. Mercado Pago may return `404` when this prerequisite is missing.
+- Manual sync atomically claims the integration, returns `202 Accepted`, and runs report creation/polling/download/import in an in-process background task with independent short-lived DB sessions. The UI polls persisted lifecycle fields and keeps a global indicator visible across navigation.
+- A running sync blocks overlapping manual/scheduled sync, token replacement, and disconnect. Startup converts abandoned `running` states into an interrupted error. Do not solve proxy timeouts by making nginx wait for the 180-second Mercado Pago polling window.
+- Correlate polling by the report ID returned from creation. Only when no ID exists may exact begin/end timestamps be used; never choose an older report because it covers the requested range.
+- Manual incremental sync advances `last_sync_at`; explicit historical range sync does not advance that cursor.
+- Range sync requires both dates; the UI defaults both to the user's local current date.
+- Daily auto sync runs in the API process at the configured Argentina hour and overlaps prior days to catch delayed movements. Idempotent fingerprints make overlap safe.
+- Linked-card payments are ignored to avoid duplicating credit-card statement expenses. Supported account-money purchases/transfers/refunds become expenses or earnings according to movement semantics.
+- Enrich technical CSV references through `/v1/payments/{SOURCE_ID}` where possible. `SOURCE_ID` is preferred over `ORDER_ID`; payment description, business metadata, and recognizable idempotency-key fragments provide merchant-name fallbacks.
+- A repeated sync may improve a previously generic description without creating a second expense.
+- Mercado Pago import lines persist stable merchant identity from `collector.id`, falling back to `store_id` only when the collector is absent. Never use payment, order, source, or external-reference IDs as merchant learning keys.
+- Editing a Mercado Pago expense learns an explicitly changed description plus submitted category/subcategory/recurrent values into a household-wide merchant rule. Rules affect only future imports; duplicate sync may backfill identity but must not alter historical expenses or overwrite manually edited descriptions.
+- Expense descriptions are editable for every source, trimmed, non-empty, and limited to 240 characters. Learned description replacement is Mercado Pago-only for now.
+- New Mercado Pago expenses have empty notes. Existing generated notes are deliberately not migrated.
+- Deleted Mercado Pago expenses must be importable again; an orphan committed import line is stale state, not a valid duplicate.
+- Local HTTP debug logging may include personal response data even though credentials are redacted. It must remain disabled in production.
 
 ### Categories / Subcategories / Casa
 
@@ -324,6 +381,7 @@ docker compose -f docker-compose.test.yml run --rm test-runner
 - `.env.example` documents expected variables.
 - Receipt/ticket LLM parsing uses a Gemini key if configured. If the LLM key is missing, over limit, or fails, fallback is local OCR/parser.
 - Personal statements and real financial files should stay uncommitted. Use sanitized fixtures under `tests/fixtures/`.
+- Mercado Pago tokens, settlement CSVs, and captured request/response bodies are personal financial data and must never be committed.
 
 ## Domain Decisions
 
@@ -337,7 +395,7 @@ Important fields:
 - `amount_ars`: reporting amount in ARS
 - `paid_by_user_id`: user who paid
 - `uploaded_by_user_id`: user who uploaded/created the data
-- `source`: `manual`, `import_pdf` (shown as "Credito" in UI), `bank_import`, `cash`, `transfer`, `other`
+- `source`: `manual`, `import_pdf` (shown as "Credito" in UI), `bank_import`, `mercadopago`, `cash`, `transfer`, `other`
 - optional `category_id`, `subcategory_id`, `notes`, `is_recurring`
 
 No equal split logic exists. Reports can filter by payer/uploader/category/date, but paid totals remain per payer.
@@ -429,7 +487,7 @@ Category edits should affect historical data because expenses store category IDs
 
 ### Merchant Learning
 
-When the user categorizes an imported item correctly, future similar items should learn that category/subcategory/recurrent flag.
+When the user categorizes an imported item correctly, future similar items should learn that category/subcategory/recurrent flag. Mercado Pago additionally has stable identity rules as described above and can learn an explicitly edited description.
 
 Two key cases:
 - Installments: descriptions with `01/06`, `02/06`, etc. should normalize to the same merchant/pattern.
@@ -472,10 +530,11 @@ Dashboard focus is consumption over time.
 Current order:
 1. Filtros
 2. Consumo mensual current year
-3. Proyeccion recurrente
-4. Consumo acumulado current year
-5. Promedio mensual por categoria
-6. Variacion mensual por categoria
+3. Consumos por categoria
+4. Proyeccion recurrente
+5. Consumo acumulado current year
+6. Promedio mensual por categoria
+7. Variacion mensual por categoria
 
 Dashboard filters:
 - household/all users or individual payer
@@ -486,16 +545,18 @@ Dashboard filters:
 Charts:
 - legends should use consistent category colors and order
 - clicking a legend category highlights that category across charts
+- `Consumo mensual` is a stacked category bar chart and shows the visible-category monthly total centered above each non-empty month bar, formatted with the app currency formatter.
 - stacked monthly chart tooltips should show only the hovered category/amount
 - avoid the default Recharts white translucent cursor overlay
+- `Consumos por categoria` is a vertical bar chart immediately after `Consumo mensual`. It uses `amount_ars`, respects the global payer/category filters and non-consumption rules, defaults its own month selector to the latest available month in the filtered dashboard data, allows multiple selected months, sums selected months into one bar per category, orders categories by total descending, stacks each category bar by `paid_by_user_id`, shows a payer legend, always shows the formatted category total above each bar, and keeps labels legible with horizontal scroll/minimum category width on narrow or high-cardinality views.
 - Card statement imports have a `statement_period` (`YYYY-MM`) that represents the statement month, separate from individual transaction dates.
 - For BBVA card statements, infer `statement_period` from `VENCIMIENTO ACTUAL`: if due date is before day 25, use the previous calendar month; otherwise use the due-date month. The import review UI lets the user override it.
 - Import history and dashboard statement coverage for card statements must use `statement_period`, not transaction months. This prevents a June statement with a few July-dated transactions from marking July as loaded.
-- `Promedio mensual por categoria` uses the latest covered card statement period for the current dashboard filter. In household view, the latest period is the latest month common to all household members with loaded card summaries; when filtering a person, use that person's latest loaded period.
+- `Promedio mensual por categoria` is collapsed by default in the dashboard. It uses the latest covered card statement period for the current dashboard filter. In household view, the latest period is the latest month common to all household members with loaded card summaries; when filtering a person, use that person's latest loaded period.
 - Average columns include only months whose card statement period is loaded/covered for the current dashboard filter. Within those covered months, category values of 0 are real data and must be included in the divisor. Example: latest 3 covered months May=0, April=350k, March=20k => average is 370k / 3.
-- The annual average uses the prior calendar year and only months from that year that are loaded/covered for the current dashboard filter, including zero category values for covered months.
-- `Promedio mensual por categoria` has sortable columns and defaults to `Promedio mensual (6 meses)` descending. Headers for the latest month and rolling averages are displayed on two lines, e.g. `Promedio mensual` / `(3 meses)` and `Ultimo mes` / `(2026-06 (Junio))`.
-- `Variacion mensual por categoria` compares each loaded month in the visible year against the average of up to the previous 3 loaded months in that same visible year. Zero category values in loaded months count in the average; unloaded months are excluded.
+- `Promedio mensual por categoria` shows only `Categoria`, `Mes en curso`, `Ultimo mes`, and `Promedio mensual (6 meses)`, in that order. `Mes en curso` is the accumulated consumption in the current calendar month and respects the dashboard global filters and existing consumption rules. `Ultimo mes` and `Promedio mensual (6 meses)` preserve their prior covered-card-period semantics.
+- `Promedio mensual por categoria` has sortable columns and defaults to `Promedio mensual (6 meses)` descending. Headers for the latest month and rolling average are displayed on two lines, e.g. `Promedio mensual` / `(6 meses)` and `Ultimo mes` / `(2026-06 (Junio))`.
+- `Consumo acumulado` and `Variacion mensual por categoria` are also collapsed by default in the dashboard. `Variacion mensual por categoria` compares each loaded month in the visible year against the average of up to the previous 3 loaded months in that same visible year. Zero category values in loaded months count in the average; unloaded months are excluded.
 
 Expenses page:
 - group expenses by month/year
@@ -504,7 +565,7 @@ Expenses page:
 - search must match description, category, and `Sin categoria`
 - show original currency/amount and totals in ARS and USD
 - uncategorized expenses should have a warning marker
-- expenses can be edited/deleted, including amount/category/recurrent/notes
+- expenses can be edited/deleted, including description/amount/category/recurrent/notes
 
 Imports page:
 - totals by currency must be prominent
@@ -523,7 +584,7 @@ Unit tests cover:
 - BBVA card parser normalization and multi-cardholder sections
 - BBVA account parser classification
 - import commit accounting, rejected lines, reimbursements, recurring offsets
-- dashboard recurring projection behavior
+- dashboard recurring projection behavior and category-by-payer dashboard aggregation
 - merchant learning
 - receipt AI/local parsing
 - Jumbo receipt parser
@@ -531,6 +592,7 @@ Unit tests cover:
 E2E/visual tests cover:
 - test-mode login/reset
 - dashboard render and filters
+- dashboard category consumption chart render, default latest-month selection, payer legend, visible totals, and tooltip detail
 - expenses CRUD/search/sort
 - card import review
 - pending import deletion
@@ -541,6 +603,9 @@ E2E/visual tests cover:
 - subcategory CRUD
 - receipt review/association
 - visual snapshots
+- Mercado Pago token management, range validation, sync loading state, and result handling
+
+Mercado Pago unit tests cover report parsing, exact report correlation, report-config bootstrap, ownership, token lifecycle, asynchronous job state/results/failures, overlap rejection, interrupted-job recovery, incremental and historical ranges, idempotency, stale fingerprint recovery, deleted-expense reimport, merchant enrichment, stable merchant learning, categorization reuse, empty notes, and failed-download cursor behavior.
 
 When changing imports, always run at least:
 
@@ -555,6 +620,17 @@ When changing dashboard recurring, also run:
 docker compose -f docker-compose.test.yml run --rm test-runner bash -lc "python -m unittest tests.unit.test_dashboard_recurring"
 ```
 
+When changing dashboard chart UI, run the dashboard unit tests, a targeted Playwright dashboard test, and the frontend build. The Playwright dashboard tests require test auth in the Vite app, for example `VITE_TEST_USER_EMAIL=mauro@example.test`.
+
+When changing Mercado Pago, run at least:
+
+```powershell
+docker compose -f docker-compose.test.yml run --rm test-runner bash -lc "python -m unittest tests.unit.test_mercadopago_sync"
+docker compose -f docker-compose.test.yml run --rm test-runner bash -lc "cd frontend && npm run build"
+```
+
+Also run the Mercado Pago profile Playwright test when UI behavior changes. A real account has successfully completed connection, settlement-report generation, historical import, merchant enrichment, and repeated synchronization. One final real-account smoke test is planned before merging the current feature branch; do not treat that note as a product defect or replace automated coverage with live-account testing.
+
 When changing frontend broadly, run:
 
 ```powershell
@@ -568,7 +644,7 @@ To reduce token usage:
 - Paste or reference only this file plus the specific user request.
 - Ask Codex to inspect current files before editing, because the worktree may be dirty.
 - Avoid pasting long previous conversations. Put durable decisions here instead.
-- Keep new decisions in this file when they affect future work.
+- Keep new decisions in this file when they affect future work, especially after adding a feature, changing product semantics, changing API response shape, or discovering a test/runtime detail that future work should not rediscover.
 - Prefer targeted tests first, then full container tests when a larger workflow changed.
 
 Important safety:

@@ -1,5 +1,5 @@
 export type Currency = "ARS" | "USD";
-export type ExpenseSource = "manual" | "import_pdf" | "bank_import" | "cash" | "transfer" | "other";
+export type ExpenseSource = "manual" | "import_pdf" | "bank_import" | "mercadopago" | "cash" | "transfer" | "other";
 
 export type Category = {
   id: number;
@@ -29,6 +29,31 @@ export type HomeGroup = {
   name: string;
 };
 
+export type MercadoPagoIntegration = {
+  user_id: number;
+  connected: boolean;
+  enabled: boolean;
+  mp_user_id: string | null;
+  mp_nickname: string | null;
+  mp_site_id: string | null;
+  last_sync_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+  last_report_file_name: string | null;
+  last_sync_started_at: string | null;
+  last_sync_completed_at: string | null;
+  last_sync_begin_date: string | null;
+  last_sync_end_date: string | null;
+  last_sync_imported: number | null;
+  last_sync_ignored: number | null;
+  last_sync_duplicates: number | null;
+  updated_at: string | null;
+};
+
+export type MercadoPagoSyncAccepted = {
+  status: "running";
+};
+
 export type Expense = {
   id: number;
   date: string;
@@ -51,6 +76,14 @@ export type DashboardSummary = {
   by_user: Array<{ user_id: number; amount_ars: string }>;
   trend: Array<{ period: string; amount_ars: string }>;
   monthly_by_category: Array<Record<string, string>>;
+  monthly_category_by_payer: Array<{
+    period: string;
+    categories: Array<{
+      name: string;
+      total_amount_ars: string;
+      by_user: Array<{ user_id: number; amount_ars: string }>;
+    }>;
+  }>;
   cumulative_by_category: Array<Record<string, string>>;
   card_statement_periods?: string[];
   fx_rate?: {

@@ -1,5 +1,5 @@
 import { categories, demoDashboard, demoExpenses, demoImport } from "./mockData";
-import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, HomeGroup, ImportBatch, ReceiptImport, Subcategory, User } from "./types";
+import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, HomeGroup, ImportBatch, MercadoPagoIntegration, MercadoPagoSyncAccepted, ReceiptImport, Subcategory, User } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "/api" : "/finance/api");
 const TEST_USER_EMAIL = import.meta.env.VITE_TEST_USER_EMAIL;
@@ -13,11 +13,20 @@ async function request<T>(path: string, init?: RequestInit, fallback?: T): Promi
       credentials: "include",
       headers: { ...authHeaders, ...(init?.headers ?? {}) }
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`;
+      try {
+        const errorBody = await res.json();
+        if (typeof errorBody?.detail === "string") message = errorBody.detail;
+      } catch {
+        message = await res.text().catch(() => message);
+      }
+      throw new Error(message);
+    }
     return (await res.json()) as T;
-  } catch {
+  } catch (error) {
     if (apiFallbacksEnabled && fallback !== undefined) return fallback;
-    throw new Error("No se pudo conectar con la API");
+    throw error instanceof Error ? error : new Error("No se pudo conectar con la API");
   }
 }
 
@@ -52,6 +61,33 @@ export const api = {
   deleteMember: (homeId: number, userId: number) =>
     request<{ ok: boolean }>(
       `/households/${homeId}/members/${userId}`,
+      { method: "DELETE" }
+    ),
+  mercadoPagoIntegrations: (homeId: number) =>
+    request<MercadoPagoIntegration[]>(`/households/${homeId}/mercadopago/integrations`, undefined, []),
+  connectMercadoPago: (homeId: number, userId: number, accessToken: string) =>
+    request<MercadoPagoIntegration>(
+      `/households/${homeId}/mercadopago/integrations/${userId}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: accessToken, enabled: true })
+      }
+    ),
+  syncMercadoPago: (homeId: number, userId: number, payload?: { start_date?: string; end_date?: string }) =>
+    request<MercadoPagoSyncAccepted>(
+      `/households/${homeId}/mercadopago/integrations/${userId}/sync`,
+      payload
+        ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          }
+        : { method: "POST" }
+    ),
+  disconnectMercadoPago: (homeId: number, userId: number) =>
+    request<{ ok: boolean }>(
+      `/households/${homeId}/mercadopago/integrations/${userId}`,
       { method: "DELETE" }
     ),
   dashboard: (homeId: number, paidByUserId?: string, categoryIds: number[] = []) => {

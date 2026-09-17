@@ -110,6 +110,31 @@ export const demoDashboard: DashboardSummary = {
     { period: "2026-04", Delivery: "60000.00", "Sin categoria": "170000.00", Servicios: "85000.00" },
     { period: "2026-05", Delivery: "39380.00", "Sin categoria": "163472.90", Suscripciones: "20000.00" }
   ],
+  monthly_category_by_payer: [
+    {
+      period: "2026-03",
+      categories: [
+        { name: "Sin categoria", total_amount_ars: "84000.00", by_user: [{ user_id: 1, amount_ars: "84000.00" }] },
+        { name: "Delivery", total_amount_ars: "45000.00", by_user: [{ user_id: 1, amount_ars: "45000.00" }] }
+      ]
+    },
+    {
+      period: "2026-04",
+      categories: [
+        { name: "Sin categoria", total_amount_ars: "170000.00", by_user: [{ user_id: 1, amount_ars: "120000.00" }, { user_id: 2, amount_ars: "50000.00" }] },
+        { name: "Servicios", total_amount_ars: "85000.00", by_user: [{ user_id: 2, amount_ars: "85000.00" }] },
+        { name: "Delivery", total_amount_ars: "60000.00", by_user: [{ user_id: 1, amount_ars: "60000.00" }] }
+      ]
+    },
+    {
+      period: "2026-05",
+      categories: [
+        { name: "Sin categoria", total_amount_ars: "163472.90", by_user: [{ user_id: 1, amount_ars: "101232.40" }, { user_id: 2, amount_ars: "62240.50" }] },
+        { name: "Delivery", total_amount_ars: "39380.00", by_user: [{ user_id: 1, amount_ars: "39380.00" }] },
+        { name: "Suscripciones", total_amount_ars: "20000.00", by_user: [{ user_id: 1, amount_ars: "20000.00" }] }
+      ]
+    }
+  ],
   cumulative_by_category: [
     { period: "2026-03", Delivery: "45000.00", "Sin categoria": "84000.00" },
     { period: "2026-04", Delivery: "105000.00", "Sin categoria": "254000.00", Servicios: "85000.00" },

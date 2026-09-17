@@ -51,6 +51,7 @@ def dashboard(
     by_user: dict[int, Decimal] = {}
     trend: dict[str, Decimal] = {}
     monthly_by_category: dict[str, dict[str, Decimal]] = {}
+    monthly_category_by_payer: dict[str, dict[str, dict[int, Decimal]]] = {}
     for expense in expenses:
         category = categories.get(expense.category_id, "Sin categoria")
         by_category[category] = by_category.get(category, Decimal("0")) + Decimal(expense.amount_ars)
@@ -59,6 +60,11 @@ def dashboard(
         trend[month] = trend.get(month, Decimal("0")) + Decimal(expense.amount_ars)
         monthly_by_category.setdefault(month, {})
         monthly_by_category[month][category] = monthly_by_category[month].get(category, Decimal("0")) + Decimal(expense.amount_ars)
+        monthly_category_by_payer.setdefault(month, {}).setdefault(category, {})
+        monthly_category_by_payer[month][category][expense.paid_by_user_id] = (
+            monthly_category_by_payer[month][category].get(expense.paid_by_user_id, Decimal("0"))
+            + Decimal(expense.amount_ars)
+        )
 
     cumulative_totals: dict[str, Decimal] = {}
     cumulative_by_category = []
@@ -187,6 +193,26 @@ def dashboard(
         monthly_by_category=[
             {"period": period, **values}
             for period, values in sorted(monthly_by_category.items())
+        ],
+        monthly_category_by_payer=[
+            {
+                "period": period,
+                "categories": [
+                    {
+                        "name": category,
+                        "total_amount_ars": sum(by_payer.values(), Decimal("0")),
+                        "by_user": [
+                            {"user_id": user_id, "amount_ars": amount}
+                            for user_id, amount in sorted(by_payer.items())
+                        ],
+                    }
+                    for category, by_payer in sorted(
+                        values.items(),
+                        key=lambda item: (-sum(item[1].values(), Decimal("0")), item[0]),
+                    )
+                ],
+            }
+            for period, values in sorted(monthly_category_by_payer.items())
         ],
         cumulative_by_category=cumulative_by_category,
         card_statement_periods=_card_statement_periods(db, home_group_id, paid_by_user_id),
