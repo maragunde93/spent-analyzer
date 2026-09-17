@@ -59,6 +59,13 @@ class MercadoPagoIntegration(Base):
     last_sync_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
     last_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_report_file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_sync_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_sync_begin_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_sync_end_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_sync_imported: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_sync_ignored: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_sync_duplicates: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -99,6 +106,24 @@ class Merchant(Base):
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class MercadoPagoMerchantRule(Base):
+    __tablename__ = "mercadopago_merchant_rules"
+    __table_args__ = (UniqueConstraint("home_group_id", "merchant_key", name="uq_mp_merchant_rule_home_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
+    merchant_key: Mapped[str] = mapped_column(String(120))
+    collector_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    store_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    learned_description: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    has_category_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
+    subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
+    is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Expense(Base):
@@ -175,6 +200,9 @@ class ImportLine(Base):
     status: Mapped[str] = mapped_column(String(40), default="pending")
     fingerprint: Mapped[str] = mapped_column(String(128))
     raw_text: Mapped[str] = mapped_column(Text)
+    mercadopago_merchant_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    mercadopago_collector_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    mercadopago_store_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
 class CashWalletEntry(Base):

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,20 +10,26 @@ from app.services.mercadopago import MercadoPagoClient, parse_report_csv, valida
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="POC manual para Account Money Report de Mercado Pago.")
-    parser.add_argument("--access-token", required=True)
+    parser.add_argument("--access-token", default=os.environ.get("MERCADOPAGO_ACCESS_TOKEN"))
     parser.add_argument("--begin", required=True, help="Inicio ISO, por ejemplo 2026-08-01T00:00:00Z")
     parser.add_argument("--end", required=True, help="Fin ISO, por ejemplo 2026-08-03T23:59:59Z")
     parser.add_argument("--out", default="mercadopago-report.csv")
+    parser.add_argument("--debug-http", action="store_true", help="Loguea requests/responses salientes con Authorization redactado.")
     args = parser.parse_args()
+    if not args.access_token:
+        parser.error("--access-token o MERCADOPAGO_ACCESS_TOKEN es requerido")
 
     settings = get_settings()
     client = MercadoPagoClient(
         args.access_token,
         api_base_url=settings.mercadopago_api_base_url,
         identity_base_url=settings.mercadopago_identity_base_url,
+        debug_http=args.debug_http,
     )
     account = await client.validate_token()
     print(f"Token OK. Cuenta: id={account.mp_user_id} nickname={account.nickname} site={account.site_id}")
+    config = await client.ensure_report_config(account.mp_user_id)
+    print(f"Config OK. Prefijo: {config.get('file_name_prefix')}")
 
     begin = _parse_iso(args.begin)
     end = _parse_iso(args.end)

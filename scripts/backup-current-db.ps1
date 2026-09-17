@@ -42,7 +42,7 @@ $dbService = Get-EnvOrDefault "SPENT_DB_SERVICE" "postgres"
 $dbName = Get-EnvOrDefault "SPENT_POSTGRES_DB" "spent_analyzer"
 $dbUser = Get-EnvOrDefault "SPENT_POSTGRES_USER" "spent"
 $backupDir = Get-EnvOrDefault "SPENT_BACKUP_DIR" (Join-Path $repoRoot "backups")
-$timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+$timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssfffZ")
 $backupPath = Join-Path $backupDir "spent_analyzer_$timestamp.dump"
 if ([System.IO.Path]::IsPathRooted($envFile)) {
     $envFilePath = $envFile

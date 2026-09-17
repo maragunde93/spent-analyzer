@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,13 +7,23 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_home_member
 from app.config import get_settings
-from app.database import get_db
-from app.models import Membership, MercadoPagoIntegration, User
-from app.schemas import MercadoPagoIntegrationRead, MercadoPagoSyncRead, MercadoPagoTokenUpdate
+from app.database import SessionLocal, get_db
+from app.models import MercadoPagoIntegration, User
+from app.schemas import MercadoPagoIntegrationRead, MercadoPagoSyncAccepted, MercadoPagoSyncRequest, MercadoPagoTokenUpdate
 from app.services.audit import log_action
-from app.services.mercadopago import MercadoPagoClient, MercadoPagoError, MercadoPagoTemporaryError, sync_integration
+from app.services.mercadopago import MercadoPagoClient, MercadoPagoError, claim_mercadopago_sync, execute_mercadopago_sync_job
 
 router = APIRouter(prefix="/households/{home_group_id}/mercadopago", tags=["mercadopago"])
+_sync_tasks: set[asyncio.Task[None]] = set()
+
+
+async def cancel_running_sync_tasks() -> None:
+    tasks = list(_sync_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _sync_tasks.clear()
 
 
 @router.get("/integrations", response_model=list[MercadoPagoIntegrationRead])
@@ -22,12 +33,13 @@ def list_integrations(
     db: Session = Depends(get_db),
 ) -> list[MercadoPagoIntegrationRead]:
     require_home_member(home_group_id, user, db)
-    members = list(db.scalars(select(Membership).where(Membership.home_group_id == home_group_id)))
-    integrations = {
-        integration.user_id: integration
-        for integration in db.scalars(select(MercadoPagoIntegration).where(MercadoPagoIntegration.home_group_id == home_group_id))
-    }
-    return [_integration_read(member.user_id, integrations.get(member.user_id)) for member in members]
+    integration = db.scalar(
+        select(MercadoPagoIntegration).where(
+            MercadoPagoIntegration.home_group_id == home_group_id,
+            MercadoPagoIntegration.user_id == user.id,
+        )
+    )
+    return [_integration_read(user.id, integration)]
 
 
 @router.put("/integrations/{member_user_id}", response_model=MercadoPagoIntegrationRead)
@@ -39,25 +51,30 @@ async def upsert_integration(
     db: Session = Depends(get_db),
 ) -> MercadoPagoIntegrationRead:
     require_home_member(home_group_id, user, db)
-    _require_member_user(home_group_id, member_user_id, db)
+    _require_own_integration(member_user_id, user)
+    existing = db.scalar(
+        select(MercadoPagoIntegration).where(
+            MercadoPagoIntegration.home_group_id == home_group_id,
+            MercadoPagoIntegration.user_id == member_user_id,
+        )
+    )
+    if existing is not None and existing.last_sync_status == "running":
+        raise HTTPException(status_code=409, detail="Hay una sincronizacion de Mercado Pago en curso")
     token = payload.access_token.strip()
     settings = get_settings()
     client = MercadoPagoClient(
         token,
         api_base_url=settings.mercadopago_api_base_url,
         identity_base_url=settings.mercadopago_identity_base_url,
+        debug_http=settings.mercadopago_debug_http_enabled,
+        debug_http_max_chars=settings.mercadopago_debug_http_max_chars,
     )
     try:
         account = await client.validate_token()
     except MercadoPagoError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    integration = db.scalar(
-        select(MercadoPagoIntegration).where(
-            MercadoPagoIntegration.home_group_id == home_group_id,
-            MercadoPagoIntegration.user_id == member_user_id,
-        )
-    )
+    integration = existing
     if integration is None:
         integration = MercadoPagoIntegration(home_group_id=home_group_id, user_id=member_user_id, access_token=token)
         db.add(integration)
@@ -76,14 +93,16 @@ async def upsert_integration(
     return _integration_read(member_user_id, integration)
 
 
-@router.post("/integrations/{member_user_id}/sync", response_model=MercadoPagoSyncRead)
+@router.post("/integrations/{member_user_id}/sync", response_model=MercadoPagoSyncAccepted, status_code=202)
 async def sync_now(
     home_group_id: int,
     member_user_id: int,
+    payload: MercadoPagoSyncRequest | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> MercadoPagoSyncRead:
+) -> MercadoPagoSyncAccepted:
     require_home_member(home_group_id, user, db)
+    _require_own_integration(member_user_id, user)
     integration = db.scalar(
         select(MercadoPagoIntegration).where(
             MercadoPagoIntegration.home_group_id == home_group_id,
@@ -92,40 +111,31 @@ async def sync_now(
     )
     if integration is None or not integration.enabled:
         raise HTTPException(status_code=404, detail="Integracion Mercado Pago no conectada")
+    if payload and bool(payload.start_date) != bool(payload.end_date):
+        raise HTTPException(status_code=400, detail="Para sincronizar un rango, completa las fechas Desde y Hasta")
     settings = get_settings()
-    client = MercadoPagoClient(
-        integration.access_token,
-        api_base_url=settings.mercadopago_api_base_url,
-        identity_base_url=settings.mercadopago_identity_base_url,
-    )
-    try:
-        result = await sync_integration(
-            db,
-            integration,
-            client=client,
+    if not claim_mercadopago_sync(db, integration.id):
+        raise HTTPException(status_code=409, detail="Hay una sincronizacion de Mercado Pago en curso")
+    custom_range = bool(payload and payload.start_date and payload.end_date)
+    task = asyncio.create_task(
+        execute_mercadopago_sync_job(
+            SessionLocal,
+            integration.id,
+            api_base_url=settings.mercadopago_api_base_url,
+            identity_base_url=settings.mercadopago_identity_base_url,
             overlap_days=settings.mercadopago_sync_overlap_days,
             poll_interval_seconds=settings.mercadopago_report_poll_interval_seconds,
             poll_timeout_seconds=settings.mercadopago_report_poll_timeout_seconds,
+            start_date=payload.start_date if payload else None,
+            end_date=payload.end_date if payload else None,
+            advance_cursor=not custom_range,
+            debug_http=settings.mercadopago_debug_http_enabled,
+            debug_http_max_chars=settings.mercadopago_debug_http_max_chars,
         )
-    except MercadoPagoTemporaryError as exc:
-        db.rollback()
-        integration.last_sync_status = "error"
-        integration.last_sync_error = str(exc)
-        db.commit()
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except MercadoPagoError as exc:
-        db.rollback()
-        integration.last_sync_status = "error"
-        integration.last_sync_error = str(exc)
-        db.commit()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        db.rollback()
-        integration.last_sync_status = "error"
-        integration.last_sync_error = str(exc)[:1000]
-        db.commit()
-        raise HTTPException(status_code=500, detail="No se pudo sincronizar Mercado Pago") from exc
-    return MercadoPagoSyncRead(**result.__dict__)
+    )
+    _sync_tasks.add(task)
+    task.add_done_callback(_sync_tasks.discard)
+    return MercadoPagoSyncAccepted()
 
 
 @router.delete("/integrations/{member_user_id}")
@@ -136,6 +146,7 @@ def delete_integration(
     db: Session = Depends(get_db),
 ) -> dict:
     require_home_member(home_group_id, user, db)
+    _require_own_integration(member_user_id, user)
     integration = db.scalar(
         select(MercadoPagoIntegration).where(
             MercadoPagoIntegration.home_group_id == home_group_id,
@@ -143,21 +154,17 @@ def delete_integration(
         )
     )
     if integration is not None:
+        if integration.last_sync_status == "running":
+            raise HTTPException(status_code=409, detail="Hay una sincronizacion de Mercado Pago en curso")
         log_action(db, home_group_id, user.id, "mercadopago_disconnect", "mercadopago_integration", f"Mercado Pago desconectado para usuario #{member_user_id}", integration.id)
         db.delete(integration)
         db.commit()
     return {"ok": True}
 
 
-def _require_member_user(home_group_id: int, member_user_id: int, db: Session) -> None:
-    membership = db.scalar(
-        select(Membership).where(
-            Membership.home_group_id == home_group_id,
-            Membership.user_id == member_user_id,
-        )
-    )
-    if membership is None:
-        raise HTTPException(status_code=404, detail="Miembro no encontrado")
+def _require_own_integration(member_user_id: int, user: User) -> None:
+    if member_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Solo puedes administrar tu propia integracion de Mercado Pago")
 
 
 def _integration_read(user_id: int, integration: MercadoPagoIntegration | None) -> MercadoPagoIntegrationRead:
@@ -174,5 +181,12 @@ def _integration_read(user_id: int, integration: MercadoPagoIntegration | None) 
         last_sync_status=integration.last_sync_status,
         last_sync_error=integration.last_sync_error,
         last_report_file_name=integration.last_report_file_name,
+        last_sync_started_at=integration.last_sync_started_at.isoformat() if integration.last_sync_started_at else None,
+        last_sync_completed_at=integration.last_sync_completed_at.isoformat() if integration.last_sync_completed_at else None,
+        last_sync_begin_date=integration.last_sync_begin_date.isoformat() if integration.last_sync_begin_date else None,
+        last_sync_end_date=integration.last_sync_end_date.isoformat() if integration.last_sync_end_date else None,
+        last_sync_imported=integration.last_sync_imported,
+        last_sync_ignored=integration.last_sync_ignored,
+        last_sync_duplicates=integration.last_sync_duplicates,
         updated_at=integration.updated_at.isoformat() if integration.updated_at else None,
     )

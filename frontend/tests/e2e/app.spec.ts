@@ -74,16 +74,17 @@ test("core bills workflow renders and supports import review", async ({ page, re
   await page.getByPlaceholder("Buscar gasto").fill("Cafe");
   await expect(page.getByText("Cafe de prueba")).toBeVisible();
   await page.getByRole("button", { name: "Editar gasto Cafe de prueba" }).click();
+  await page.getByLabel("Editar descripcion Cafe de prueba").fill("Cafe editado");
   await page.getByLabel("Editar importe Cafe de prueba").fill("5000");
   await page.getByLabel("Editar categoria Cafe de prueba").selectOption({ label: "Salud" });
   await page.getByRole("button", { name: "Guardar gasto Cafe de prueba" }).click();
   await page.getByPlaceholder("Buscar gasto").fill("Salud");
-  await expect(page.getByText("Cafe de prueba")).toBeVisible();
+  await expect(page.getByText("Cafe editado")).toBeVisible();
   page.once("dialog", async (dialog) => {
     await dialog.accept();
   });
-  await page.getByRole("button", { name: "Eliminar gasto Cafe de prueba" }).click();
-  await expect(page.getByText("Cafe de prueba")).toHaveCount(0);
+  await page.getByRole("button", { name: "Eliminar gasto Cafe editado" }).click();
+  await expect(page.getByText("Cafe editado")).toHaveCount(0);
   await request.post("http://127.0.0.1:8000/households/1/expenses", {
     headers: { "X-Test-User-Email": "mauro@example.test" },
     data: {
@@ -189,6 +190,21 @@ test("expense month groups can be collapsed while searching and after clearing s
   await expect(page.getByText("Filtro colapso junio")).toHaveCount(0);
 });
 
+test("expense descriptions can be edited for any source", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Consumos" }).click();
+  await page.getByLabel("Descripcion").fill("Descripcion original");
+  await page.getByLabel("Importe").fill("1250");
+  await page.getByRole("button", { name: "Agregar" }).click();
+  await page.getByPlaceholder("Buscar gasto").fill("Descripcion original");
+  await page.getByRole("button", { name: "Editar gasto Descripcion original" }).click();
+  await page.getByLabel("Editar descripcion Descripcion original").fill("Descripcion corregida");
+  await page.getByRole("button", { name: "Guardar gasto Descripcion original" }).click();
+  await page.getByPlaceholder("Buscar gasto").fill("Descripcion corregida");
+  await expect(page.getByText("Descripcion corregida")).toBeVisible();
+  await expect(page.getByText("Descripcion original")).toHaveCount(0);
+});
+
 test("dashboard category average table shows current month and final columns", async ({ page, request }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
@@ -248,7 +264,7 @@ test("processing all selected card lines clears that import from pending imports
   await page.getByRole("button", { name: /Procesar/ }).click();
   await expect(page.getByTestId(`active-import-${batchId}`)).toHaveCount(0);
   await expect(page.getByTestId(`pending-import-${batchId}`)).toHaveCount(0);
-  await page.getByRole("button", { name: "Resumen" }).click();
+  await page.getByRole("button", { name: "Resumen", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Proyeccion recurrente" })).toBeVisible();
   await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toBeVisible();
 
@@ -459,8 +475,11 @@ test("house settings allow creating, editing, and deleting subcategories without
   expect(expense!.subcategory_id).toBeNull();
 });
 
-test("house settings manage Mercado Pago integration with mocked API", async ({ page }) => {
+test("user profile manages Mercado Pago integration with mocked API", async ({ page }) => {
   let connected = false;
+  let syncStatus: string | null = null;
+  let syncImported = 0;
+  let syncCompletedAt: string | null = null;
   await page.route("**/households/1/mercadopago/integrations", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -473,23 +492,17 @@ test("house settings manage Mercado Pago integration with mocked API", async ({ 
           mp_nickname: connected ? "mauro-mp" : null,
           mp_site_id: connected ? "MLA" : null,
           last_sync_at: connected ? "2026-08-28T12:00:00" : null,
-          last_sync_status: connected ? "ok" : null,
+          last_sync_status: connected ? syncStatus : null,
           last_sync_error: null,
           last_report_file_name: connected ? "settlement-report-test.csv" : null,
+          last_sync_started_at: syncStatus === "running" ? "2026-09-17T14:11:00" : null,
+          last_sync_completed_at: syncCompletedAt,
+          last_sync_begin_date: null,
+          last_sync_end_date: null,
+          last_sync_imported: syncStatus === "ok" ? syncImported : null,
+          last_sync_ignored: syncStatus === "ok" ? 0 : null,
+          last_sync_duplicates: syncStatus === "ok" ? 0 : null,
           updated_at: connected ? "2026-08-28T12:00:00" : null
-        },
-        {
-          user_id: 2,
-          connected: false,
-          enabled: false,
-          mp_user_id: null,
-          mp_nickname: null,
-          mp_site_id: null,
-          last_sync_at: null,
-          last_sync_status: null,
-          last_sync_error: null,
-          last_report_file_name: null,
-          updated_at: null
         }
       ])
     });
@@ -497,6 +510,7 @@ test("house settings manage Mercado Pago integration with mocked API", async ({ 
   await page.route("**/households/1/mercadopago/integrations/1", async (route) => {
     if (route.request().method() === "PUT") {
       connected = true;
+      syncStatus = "connected";
       await route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({
@@ -510,6 +524,13 @@ test("house settings manage Mercado Pago integration with mocked API", async ({ 
           last_sync_status: "connected",
           last_sync_error: null,
           last_report_file_name: null,
+          last_sync_started_at: null,
+          last_sync_completed_at: null,
+          last_sync_begin_date: null,
+          last_sync_end_date: null,
+          last_sync_imported: null,
+          last_sync_ignored: null,
+          last_sync_duplicates: null,
           updated_at: "2026-08-28T12:00:00"
         })
       });
@@ -519,25 +540,50 @@ test("house settings manage Mercado Pago integration with mocked API", async ({ 
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
   await page.route("**/households/1/mercadopago/integrations/1/sync", async (route) => {
+    const requestBody = route.request().postDataJSON() as { start_date?: string; end_date?: string } | null;
+    syncStatus = "running";
+    syncImported = requestBody?.start_date ? 2 : 0;
+    syncCompletedAt = null;
+    setTimeout(() => {
+      syncStatus = "ok";
+      syncCompletedAt = "2026-09-17T14:12:20";
+    }, 350);
     await route.fulfill({
+      status: 202,
       contentType: "application/json",
-      body: JSON.stringify({ batch_id: 9, report_file_name: "settlement-report-test.csv", imported: 4, ignored: 1, duplicates: 0 })
+      body: JSON.stringify({ status: "running" })
     });
   });
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Casa" }).click();
+  await page.getByRole("button", { name: "Mauro" }).click();
   await expect(page.getByRole("heading", { name: "Mercado Pago" })).toBeVisible();
-  await page.getByLabel("Access Token Mercado Pago Mauro").fill("APP_USR-valid-token");
-  await page.getByRole("button", { name: "Conectar" }).first().click();
+  await expect(page.getByText("Mica")).toHaveCount(0);
+  await page.getByLabel("Access Token Mercado Pago").fill("APP_USR-valid-token");
+  await page.getByRole("button", { name: "Conectar", exact: true }).click();
   await expect(page.getByText("mauro-mp")).toBeVisible();
   await expect(page.getByText("settlement-report-test.csv")).toBeVisible();
-  await page.getByRole("button", { name: "Sincronizar ahora" }).first().click();
+  await page.getByRole("button", { name: "Sincronizar ahora" }).click();
+  await expect(page.getByRole("button", { name: "Sincronizando" })).toBeVisible();
+  await page.getByLabel("Resumen", { exact: true }).click();
+  await expect(page.getByText("Mercado Pago sincronizando")).toBeVisible();
+  await expect(page.getByText("Mercado Pago sincronizando")).toHaveCount(0);
+  await page.getByRole("button", { name: "Mauro" }).click();
+  const defaultSyncDate = /^\d{4}-\d{2}-\d{2}$/;
+  await expect(page.getByLabel("Desde Mercado Pago")).toHaveValue(defaultSyncDate);
+  await expect(page.getByLabel("Hasta Mercado Pago")).toHaveValue(defaultSyncDate);
+  await page.getByLabel("Hasta Mercado Pago").fill("");
+  await expect(page.getByRole("button", { name: "Sincronizar rango" })).toBeDisabled();
+  await page.getByLabel("Desde Mercado Pago").fill("2026-08-01");
+  await page.getByLabel("Hasta Mercado Pago").fill("2026-08-31");
+  await page.getByRole("button", { name: "Sincronizar rango" }).click();
+  await expect(page.getByRole("button", { name: "Sincronizando rango" })).toBeVisible();
+  await expect(page.getByText("Sync OK: 2 importados, 0 ignorados, 0 duplicados")).toBeVisible();
   page.once("dialog", async (dialog) => {
     await dialog.accept();
   });
-  await page.getByLabel("Desconectar Mercado Pago Mauro").click();
-  await expect(page.getByText("No conectado").first()).toBeVisible();
+  await page.getByLabel("Desconectar Mercado Pago").click();
+  await expect(page.getByText("No conectado")).toBeVisible();
 });
 
 test("receipt lab parses a Jumbo OCR text ticket without creating a duplicate expense", async ({ page }) => {

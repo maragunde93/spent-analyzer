@@ -10,7 +10,7 @@ from app.config import get_settings, should_seed_development_data, validate_prod
 from app.database import Base, SessionLocal, engine, init_db
 from app.dev_seed import seed_development_data
 from app.services.fx_updater import run_daily_blue_rate_update
-from app.services.mercadopago import run_daily_mercadopago_sync
+from app.services.mercadopago import recover_interrupted_mercadopago_syncs, run_daily_mercadopago_sync
 
 
 def create_app() -> FastAPI:
@@ -46,6 +46,8 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup() -> None:
         init_db()
+        with SessionLocal() as db:
+            recover_interrupted_mercadopago_syncs(db)
         if should_seed_development_data(settings):
             with SessionLocal() as db:
                 seed_development_data(db)
@@ -67,11 +69,14 @@ def create_app() -> FastAPI:
                     overlap_days=settings.mercadopago_sync_overlap_days,
                     poll_interval_seconds=settings.mercadopago_report_poll_interval_seconds,
                     poll_timeout_seconds=settings.mercadopago_report_poll_timeout_seconds,
+                    debug_http=settings.mercadopago_debug_http_enabled,
+                    debug_http_max_chars=settings.mercadopago_debug_http_max_chars,
                 )
             )
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
+        await mercadopago.cancel_running_sync_tasks()
         task = getattr(app.state, "fx_update_task", None)
         if task is not None:
             task.cancel()

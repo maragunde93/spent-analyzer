@@ -12,6 +12,7 @@ import {
   ClipboardList,
   History as HistoryIcon,
   Home,
+  LoaderCircle,
   LogOut,
   MessageSquare,
   PiggyBank,
@@ -130,6 +131,10 @@ function monthPeriods(year: number) {
 
 function currentMonthPeriod(now = new Date()) {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function currentDateInputValue(now = new Date()) {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
 function shiftMonthPeriod(period: string, offset: number) {
@@ -566,8 +571,25 @@ export function App() {
   const dashboard = useQuery({ queryKey: ["dashboard", homeId, paidBy, dashboardCategoryIds.join(",")], queryFn: () => api.dashboard(homeId, paidBy, dashboardCategoryIds), enabled: !!currentUser.data });
   const expenses = useQuery({ queryKey: ["expenses", homeId], queryFn: () => api.expenses(homeId), enabled: !!currentUser.data });
   const categoryQuery = useQuery({ queryKey: ["categories", homeId], queryFn: () => api.categories(homeId), enabled: !!currentUser.data });
+  const mercadoPago = useQuery({
+    queryKey: ["mercadopago", homeId],
+    queryFn: () => api.mercadoPagoIntegrations(homeId),
+    enabled: !!currentUser.data,
+    refetchInterval: (query) => query.state.data?.some((item) => item.last_sync_status === "running") ? 1500 : false
+  });
+  const mercadoPagoSyncing = mercadoPago.data?.some((item) => item.last_sync_status === "running") ?? false;
+  const previousMercadoPagoSyncing = useRef(false);
   const cats = categoryQuery.data ?? (apiFallbacksEnabled ? fallbackCategories : []);
   const people = members.data?.length ? members.data : apiFallbacksEnabled ? fallbackUsers : [];
+  useEffect(() => {
+    if (previousMercadoPagoSyncing.current && !mercadoPagoSyncing) {
+      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["imports", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+    previousMercadoPagoSyncing.current = mercadoPagoSyncing;
+  }, [homeId, mercadoPagoSyncing, queryClient]);
   const addExpense = useMutation({
     mutationFn: (expense: Partial<Expense>) => api.createExpense(homeId, expense),
     onSuccess: () => {
@@ -650,6 +672,7 @@ export function App() {
             <h1>{titleFor(section)}</h1>
           </div>
           <div className="top-actions">
+            {mercadoPagoSyncing && <span className="sync-chip"><LoaderCircle size={16} /> Mercado Pago sincronizando</span>}
             {section === "dashboard" && dashboard.data?.fx_rate && <FxRateBadge fxRate={dashboard.data.fx_rate} />}
             <button className="user-chip" type="button" title="Ver mi usuario" onClick={() => setSection("profile")}>
               <UserCircle size={16} />
@@ -691,7 +714,7 @@ export function App() {
         {section === "history" && <HistoryPanel users={people} homeId={homeId} />}
         {section === "receipts" && <ReceiptsLab categories={cats} expenses={expenses.data ?? []} homeId={homeId} />}
         {section === "settings" && <SettingsPanel categories={cats} users={people} homeId={homeId} />}
-        {section === "profile" && <UserProfile currentUser={authenticatedUser} users={people} homeName={households.data?.[0]?.name ?? "Casa Adrogue"} />}
+        {section === "profile" && <UserProfile currentUser={authenticatedUser} users={people} homeId={homeId} homeName={households.data?.[0]?.name ?? "Casa Adrogue"} />}
       </main>
     </div>
   );
@@ -766,7 +789,7 @@ function titleFor(section: string) {
   }[section];
 }
 
-function UserProfile({ currentUser, users, homeName }: { currentUser: User; users: User[]; homeName: string }) {
+function UserProfile({ currentUser, users, homeId, homeName }: { currentUser: User; users: User[]; homeId: number; homeName: string }) {
   const member = users.find((user) => user.id === currentUser.id);
   const sameNameMembers = users.filter(
     (user) => user.id !== currentUser.id && user.display_name.trim().toLowerCase() === currentUser.display_name.trim().toLowerCase()
@@ -821,7 +844,168 @@ function UserProfile({ currentUser, users, homeName }: { currentUser: User; user
           <p className="muted">No hay otros miembros con el mismo nombre visible.</p>
         )}
       </div>
+      <MercadoPagoSelfPanel currentUser={currentUser} homeId={homeId} />
     </section>
+  );
+}
+
+function MercadoPagoSelfPanel({ currentUser, homeId }: { currentUser: User; homeId: number }) {
+  const [token, setToken] = useState("");
+  const today = useMemo(() => currentDateInputValue(), []);
+  const [range, setRange] = useState(() => ({ start_date: today, end_date: today }));
+  const [message, setMessage] = useState("");
+  const queryClient = useQueryClient();
+  const mercadoPago = useQuery({ queryKey: ["mercadopago", homeId], queryFn: () => api.mercadoPagoIntegrations(homeId) });
+  const integration = (mercadoPago.data ?? []).find((item) => item.user_id === currentUser.id);
+  const backendSyncing = integration?.last_sync_status === "running";
+  const previousSyncStatus = useRef(integration?.last_sync_status);
+  const connectMercadoPago = useMutation({
+    mutationFn: (accessToken: string) => api.connectMercadoPago(homeId, currentUser.id, accessToken),
+    onSuccess: () => {
+      setToken("");
+      setMessage("Token validado");
+      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  const syncMercadoPago = useMutation({
+    mutationKey: ["mercadopago-sync", homeId, currentUser.id],
+    mutationFn: ({ startDate, endDate }: { startDate?: string; endDate?: string }) =>
+      api.syncMercadoPago(
+        homeId,
+        currentUser.id,
+        startDate || endDate ? { start_date: startDate || undefined, end_date: endDate || undefined } : undefined
+      ),
+    onSuccess: () => {
+      setMessage("Sincronizacion iniciada");
+      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
+    }
+  });
+  const disconnectMercadoPago = useMutation({
+    mutationFn: () => api.disconnectMercadoPago(homeId, currentUser.id),
+    onSuccess: () => {
+      setMessage("Integracion desconectada");
+      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+    }
+  });
+  useEffect(() => {
+    const previous = previousSyncStatus.current;
+    if (previous === "running" && integration?.last_sync_status === "ok") {
+      setMessage(`Sync OK: ${integration.last_sync_imported ?? 0} importados, ${integration.last_sync_ignored ?? 0} ignorados, ${integration.last_sync_duplicates ?? 0} duplicados`);
+    } else if (previous === "running" && integration?.last_sync_status === "error") {
+      setMessage("");
+    }
+    previousSyncStatus.current = integration?.last_sync_status;
+  }, [integration?.last_sync_duplicates, integration?.last_sync_ignored, integration?.last_sync_imported, integration?.last_sync_status]);
+  const syncKind = syncMercadoPago.variables?.startDate || syncMercadoPago.variables?.endDate ? "range" : "now";
+  return (
+    <div className="panel profile-panel wide">
+      <h2>Mercado Pago</h2>
+      <div className="mp-row self">
+        <div className="mp-row-heading">
+          <div className="member-name">
+            <strong>{currentUser.display_name}</strong>
+            <small>{mercadoPagoStatus(integration)}</small>
+          </div>
+          <span className={integration?.connected ? "status" : "status warning-status"}>
+            {integration?.connected ? "Conectado" : "No conectado"}
+          </span>
+        </div>
+        <div className="mp-meta">
+          <span>Cuenta: {integration?.mp_nickname || integration?.mp_user_id || "Sin identificar"}</span>
+          <span>Ultima sync: {integration?.last_sync_completed_at ? new Date(integration.last_sync_completed_at).toLocaleString("es-AR") : "Nunca"}</span>
+          {integration?.last_report_file_name && <span>Reporte: {integration.last_report_file_name}</span>}
+        </div>
+        {integration?.last_sync_status === "error" && integration.last_sync_error && <div className="warning">Ultimo error: {integration.last_sync_error}</div>}
+        {message && <div className="status mp-result">{message}</div>}
+        <div className="mp-actions self">
+          <input
+            type="password"
+            value={token}
+            placeholder={integration?.connected ? "Reemplazar Access Token" : "Access Token"}
+            aria-label="Access Token Mercado Pago"
+            onChange={(event) => setToken(event.target.value)}
+          />
+          <button
+            className="primary"
+            disabled={token.trim().length < 10 || connectMercadoPago.isPending || backendSyncing}
+            onClick={() => {
+              connectMercadoPago.reset();
+              syncMercadoPago.reset();
+              setMessage("");
+              connectMercadoPago.mutate(token.trim());
+            }}
+          >
+            {connectMercadoPago.isPending ? <LoaderCircle className="spin" size={16} /> : <WalletCards size={16} />}
+            {integration?.connected ? "Reemplazar" : "Conectar"}
+          </button>
+          <button
+            className="mp-sync-button"
+            disabled={!integration?.connected || syncMercadoPago.isPending || backendSyncing}
+            onClick={() => {
+              syncMercadoPago.reset();
+              setMessage("");
+              syncMercadoPago.mutate({});
+            }}
+          >
+            {(syncMercadoPago.isPending && syncKind === "now") || backendSyncing ? <LoaderCircle className="spin" size={16} /> : <CalendarClock size={16} />}
+            {(syncMercadoPago.isPending && syncKind === "now") || backendSyncing ? "Sincronizando" : "Sincronizar ahora"}
+          </button>
+          <button
+            className="icon-button danger"
+            title="Desconectar Mercado Pago"
+            aria-label="Desconectar Mercado Pago"
+            disabled={!integration?.connected || disconnectMercadoPago.isPending || backendSyncing}
+            onClick={() => {
+              if (window.confirm("Desconectar Mercado Pago de tu usuario? Se elimina el token guardado.")) {
+                disconnectMercadoPago.mutate();
+              }
+            }}
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
+        <div className="mp-range self">
+          <label>
+            <span>Desde</span>
+            <input
+              type="date"
+              value={range.start_date}
+              aria-label="Desde Mercado Pago"
+              max={range.end_date || today}
+              onChange={(event) => setRange((current) => ({ ...current, start_date: event.target.value }))}
+            />
+          </label>
+          <label>
+            <span>Hasta</span>
+            <input
+              type="date"
+              value={range.end_date}
+              aria-label="Hasta Mercado Pago"
+              max={today}
+              onChange={(event) => setRange((current) => ({ ...current, end_date: event.target.value }))}
+            />
+          </label>
+          <button
+            className="mp-sync-button"
+            disabled={!integration?.connected || syncMercadoPago.isPending || backendSyncing || !range.start_date || !range.end_date}
+            onClick={() => {
+              if (!range.start_date || !range.end_date) return;
+              syncMercadoPago.reset();
+              setMessage("");
+              syncMercadoPago.mutate({ startDate: range.start_date, endDate: range.end_date });
+            }}
+          >
+            {(syncMercadoPago.isPending || backendSyncing) && syncKind === "range" ? <LoaderCircle className="spin" size={16} /> : <CalendarClock size={16} />}
+            {(syncMercadoPago.isPending || backendSyncing) && syncKind === "range" ? "Sincronizando rango" : "Sincronizar rango"}
+          </button>
+        </div>
+        {connectMercadoPago.isError && <p className="form-error settings-error">{connectMercadoPago.error.message}</p>}
+        {syncMercadoPago.isError && <p className="form-error settings-error">{syncMercadoPago.error.message}</p>}
+        {disconnectMercadoPago.isError && <p className="form-error settings-error">{disconnectMercadoPago.error.message}</p>}
+      </div>
+    </div>
   );
 }
 
@@ -1555,6 +1739,7 @@ function Expenses(props: {
   const [source, setSource] = useState<ExpenseSource>("cash");
   const [isRecurring, setIsRecurring] = useState(false);
   const [editingExpenseId, setEditingExpenseId] = useState<number | null>(null);
+  const [editDescription, setEditDescription] = useState("");
   const [editAmount, setEditAmount] = useState("");
   const [editCategoryId, setEditCategoryId] = useState("");
   const [editSubcategoryId, setEditSubcategoryId] = useState("");
@@ -1603,6 +1788,7 @@ function Expenses(props: {
   };
   const startEditing = (expense: Expense) => {
     setEditingExpenseId(expense.id);
+    setEditDescription(expense.description);
     setEditAmount(String(expense.original_amount));
     setEditCategoryId(expense.category_id ? String(expense.category_id) : "");
     setEditSubcategoryId(expense.subcategory_id ? String(expense.subcategory_id) : "");
@@ -1765,7 +1951,17 @@ function Expenses(props: {
                         <Fragment key={expense.id}>
                           <tr className={!expense.category_id ? "needs-review-row" : undefined}>
                             <td>{expense.date}</td>
-                            <td className="description-cell">{expense.description}</td>
+                            <td className="description-cell">
+                              {isEditing ? (
+                                <input
+                                  className="description-edit"
+                                  value={editDescription}
+                                  maxLength={240}
+                                  onChange={(event) => setEditDescription(event.target.value)}
+                                  aria-label={`Editar descripcion ${expense.description}`}
+                                />
+                              ) : expense.description}
+                            </td>
                             <td>{props.users.find((u) => u.id === expense.paid_by_user_id)?.display_name ?? "Usuario"}</td>
                             <td className="category-cell">
                               {isEditing ? (
@@ -1838,8 +2034,10 @@ function Expenses(props: {
                                     className="icon-button"
                                     title="Guardar gasto"
                                     aria-label={`Guardar gasto ${expense.description}`}
+                                    disabled={!editDescription.trim()}
                                     onClick={() => {
                                       props.onUpdate(expense.id, {
+                                        description: editDescription.trim(),
                                         category_id: editCategoryId ? Number(editCategoryId) : null,
                                         subcategory_id: editSubcategoryId ? Number(editSubcategoryId) : null,
                                         original_amount: editAmount,
@@ -2849,9 +3047,7 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
   const [subcategoryName, setSubcategoryName] = useState("");
   const [editingSubcategoryId, setEditingSubcategoryId] = useState<number | null>(null);
   const [editSubcategoryName, setEditSubcategoryName] = useState("");
-  const [mpTokenByUser, setMpTokenByUser] = useState<Record<number, string>>({});
   const queryClient = useQueryClient();
-  const mercadoPago = useQuery({ queryKey: ["mercadopago", homeId], queryFn: () => api.mercadoPagoIntegrations(homeId) });
   const selectedSubcategoryCategory = categories.find((category) => category.id === selectedSubcategoryCategoryId) ?? categories[0];
   const updateMember = useMutation({
     mutationFn: ({ id, nextName, nextEmail }: { id: number; nextName: string; nextEmail: string }) =>
@@ -2936,32 +3132,6 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
       queryClient.invalidateQueries({ queryKey: ["history", homeId] });
     }
   });
-  const connectMercadoPago = useMutation({
-    mutationFn: ({ userId, accessToken }: { userId: number; accessToken: string }) => api.connectMercadoPago(homeId, userId, accessToken),
-    onSuccess: (_, variables) => {
-      setMpTokenByUser((current) => ({ ...current, [variables.userId]: "" }));
-      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
-    }
-  });
-  const syncMercadoPago = useMutation({
-    mutationFn: (userId: number) => api.syncMercadoPago(homeId, userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["imports", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
-    }
-  });
-  const disconnectMercadoPago = useMutation({
-    mutationFn: (userId: number) => api.disconnectMercadoPago(homeId, userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["history", homeId] });
-    }
-  });
-  const mercadoPagoByUser = new Map((mercadoPago.data ?? []).map((integration) => [integration.user_id, integration]));
   return (
     <section className="grid two">
       <div className="panel">
@@ -3040,72 +3210,6 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
         </div>
         {updateMember.isError && <p className="form-error settings-error">No se pudo editar el usuario. Revisá que el mail no este repetido.</p>}
         {deleteMember.isError && <p className="form-error settings-error">No se pudo eliminar el usuario. Solo se pueden borrar usuarios sin consumos asociados.</p>}
-      </div>
-      <div className="panel wide">
-        <h2>Mercado Pago</h2>
-        <div className="stack">
-          {users.map((user) => {
-            const integration = mercadoPagoByUser.get(user.id);
-            const tokenValue = mpTokenByUser[user.id] ?? "";
-            return (
-              <div className="mp-row" key={user.id}>
-                <div className="mp-row-heading">
-                  <div className="member-name">
-                    <strong>{user.display_name}</strong>
-                    <small>{mercadoPagoStatus(integration)}</small>
-                  </div>
-                  <span className={integration?.connected ? "status" : "status warning-status"}>
-                    {integration?.connected ? "Conectado" : "No conectado"}
-                  </span>
-                </div>
-                <div className="mp-meta">
-                  <span>Cuenta: {integration?.mp_nickname || integration?.mp_user_id || "Sin identificar"}</span>
-                  <span>Ultima sync: {integration?.last_sync_at ? new Date(integration.last_sync_at).toLocaleString("es-AR") : "Nunca"}</span>
-                  {integration?.last_report_file_name && <span>Reporte: {integration.last_report_file_name}</span>}
-                </div>
-                {integration?.last_sync_error && <div className="warning">Ultimo error: {integration.last_sync_error}</div>}
-                <div className="mp-actions">
-                  <input
-                    type="password"
-                    value={tokenValue}
-                    placeholder={integration?.connected ? "Reemplazar Access Token" : "Access Token"}
-                    aria-label={`Access Token Mercado Pago ${user.display_name}`}
-                    onChange={(event) => setMpTokenByUser((current) => ({ ...current, [user.id]: event.target.value }))}
-                  />
-                  <button
-                    className="primary"
-                    disabled={tokenValue.trim().length < 10 || connectMercadoPago.isPending}
-                    onClick={() => connectMercadoPago.mutate({ userId: user.id, accessToken: tokenValue.trim() })}
-                  >
-                    <WalletCards size={16} /> {integration?.connected ? "Reemplazar" : "Conectar"}
-                  </button>
-                  <button
-                    disabled={!integration?.connected || syncMercadoPago.isPending}
-                    onClick={() => syncMercadoPago.mutate(user.id)}
-                  >
-                    <CalendarClock size={16} /> Sincronizar ahora
-                  </button>
-                  <button
-                    className="icon-button danger"
-                    title="Desconectar Mercado Pago"
-                    aria-label={`Desconectar Mercado Pago ${user.display_name}`}
-                    disabled={!integration?.connected || disconnectMercadoPago.isPending}
-                    onClick={() => {
-                      if (window.confirm(`Desconectar Mercado Pago de "${user.display_name}"? Se elimina el token guardado.`)) {
-                        disconnectMercadoPago.mutate(user.id);
-                      }
-                    }}
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        {connectMercadoPago.isError && <p className="form-error settings-error">No se pudo validar el token de Mercado Pago.</p>}
-        {syncMercadoPago.isError && <p className="form-error settings-error">No se pudo sincronizar Mercado Pago. Revisá el ultimo error de la cuenta.</p>}
-        {disconnectMercadoPago.isError && <p className="form-error settings-error">No se pudo desconectar Mercado Pago.</p>}
       </div>
       <div className="panel">
         <h2>Categorias</h2>
@@ -3271,6 +3375,7 @@ function sourceLabel(source: ExpenseSource) {
 
 function mercadoPagoStatus(integration?: MercadoPagoIntegration) {
   if (!integration?.connected) return "Sin token guardado";
+  if (integration.last_sync_status === "running") return "Sincronizando";
   if (integration.last_sync_status === "error") return "Con error";
   if (integration.last_sync_status === "ok") return "Sincronizada";
   return "Token validado";

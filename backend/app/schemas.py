@@ -1,6 +1,6 @@
 from datetime import date as Date
 from decimal import Decimal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.domain import Currency, ExpenseSource, ImportLineKind
 
@@ -44,6 +44,13 @@ class MercadoPagoIntegrationRead(BaseModel):
     last_sync_status: str | None = None
     last_sync_error: str | None = None
     last_report_file_name: str | None = None
+    last_sync_started_at: str | None = None
+    last_sync_completed_at: str | None = None
+    last_sync_begin_date: str | None = None
+    last_sync_end_date: str | None = None
+    last_sync_imported: int | None = None
+    last_sync_ignored: int | None = None
+    last_sync_duplicates: int | None = None
     updated_at: str | None = None
 
 
@@ -52,12 +59,23 @@ class MercadoPagoTokenUpdate(BaseModel):
     enabled: bool = True
 
 
+class MercadoPagoSyncRequest(BaseModel):
+    start_date: Date | None = None
+    end_date: Date | None = None
+
+
 class MercadoPagoSyncRead(BaseModel):
     batch_id: int | None = None
     report_file_name: str
     imported: int
     ignored: int
     duplicates: int
+    begin_date: str | None = None
+    end_date: str | None = None
+
+
+class MercadoPagoSyncAccepted(BaseModel):
+    status: str = "running"
 
 
 class SubcategoryRead(BaseModel):
@@ -102,7 +120,7 @@ class SubcategoryUpdate(BaseModel):
 
 class ExpenseCreate(BaseModel):
     date: Date
-    description: str
+    description: str = Field(min_length=1, max_length=240)
     category_id: int | None = None
     subcategory_id: int | None = None
     paid_by_user_id: int
@@ -113,10 +131,18 @@ class ExpenseCreate(BaseModel):
     notes: str | None = Field(default=None, max_length=500)
     is_recurring: bool = False
 
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("La descripcion no puede estar vacia")
+        return stripped
+
 
 class ExpenseUpdate(BaseModel):
     date: Date | None = None
-    description: str | None = None
+    description: str | None = Field(default=None, min_length=1, max_length=240)
     category_id: int | None = None
     subcategory_id: int | None = None
     paid_by_user_id: int | None = None
@@ -126,6 +152,16 @@ class ExpenseUpdate(BaseModel):
     source: ExpenseSource | None = None
     notes: str | None = Field(default=None, max_length=500)
     is_recurring: bool | None = None
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("La descripcion no puede estar vacia")
+        return stripped
 
 
 class ExpenseRead(ExpenseCreate):

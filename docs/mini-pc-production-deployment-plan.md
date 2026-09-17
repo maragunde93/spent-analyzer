@@ -153,16 +153,72 @@ The live homelab proxy configuration is owned by the `alerting-system` project. 
 
 ## Database Backup And Restore
 
-Create a local backup from a running compose DB:
+The rotating backup keeps the most recent 7 daily, 10 weekly, and 12 monthly
+restore points. A run refreshes the restore point for the current UTC day, ISO
+week, and month, then removes expired files. Dumps are written atomically and
+validated with `pg_restore --list` before they enter the rotation.
+
+Create a rotating local backup from a running compose DB:
 
 ```bash
-bash scripts/backup-current-db.sh
+bash scripts/backup-rotated-db.sh
 ```
 
-For production compose, use:
+For a one-off production backup on the Mini PC, use:
 
 ```bash
-SPENT_COMPOSE_FILE=docker-compose.prod.yml SPENT_DB_SERVICE=spent-postgres bash scripts/backup-current-db.sh
+SPENT_COMPOSE_FILE=docker-compose.prod.yml \
+SPENT_DB_SERVICE=spent-postgres \
+bash scripts/backup-rotated-db.sh
+```
+
+Install the production schedule once on the Mini PC:
+
+```bash
+bash scripts/ubuntu/install-db-backup-schedule.sh
+```
+
+The installer creates a system-wide `systemd` service and timer, runs an
+immediate backup to verify the setup, and enables daily backups around 03:15.
+The timer uses `Persistent=true`, so a run missed while the Mini PC is off is
+started after the next boot. It is idempotent and can be run again after moving
+the repository or changing its configuration. Inspect it with:
+
+```bash
+systemctl status spent-analyzer-db-backup.timer
+systemctl list-timers spent-analyzer-db-backup.timer
+journalctl -u spent-analyzer-db-backup.service
+```
+
+Override the schedule during installation with `SPENT_BACKUP_ON_CALENDAR`, for
+example `SPENT_BACKUP_ON_CALENDAR='*-*-* 02:30:00'`.
+
+The default retention can be changed with `SPENT_BACKUP_DAILY_KEEP`,
+`SPENT_BACKUP_WEEKLY_KEEP`, and `SPENT_BACKUP_MONTHLY_KEEP`. Store
+`SPENT_BACKUP_DIR` on a different disk or replicate it off the Mini PC if the
+backup must survive failure or loss of that machine.
+
+On Windows, erase local application data while preserving tables, indexes, and
+Alembic's migration state with:
+
+```powershell
+.\scripts\wipe-db-data.ps1 -ConfirmWipe
+```
+
+The script automatically detects the running `spent-analyzer` or
+`spent-analyzer-demo` Compose project, including the generated demo Compose
+file. An unusual stack can be selected explicitly with `-ComposeProject` and
+`-ComposeFile`.
+
+The wipe stops only application services that were already running, creates a
+unique safety dump in `backups/safety/`, truncates public application tables,
+retains the latest 20 safety dumps, and restarts those services. A
+production-like target requires both switches:
+
+```powershell
+$env:SPENT_COMPOSE_FILE = "docker-compose.prod.yml"
+$env:SPENT_DB_SERVICE = "spent-postgres"
+.\scripts\wipe-db-data.ps1 -ConfirmWipe -ConfirmProductionWipe
 ```
 
 Restore on the Mini PC:

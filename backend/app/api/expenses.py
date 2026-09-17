@@ -6,11 +6,11 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_home_member
 from app.database import get_db
-from app.models import CashWalletEntry, Category, Expense, ExpenseSource, User
+from app.models import CashWalletEntry, Category, Earning, Expense, ExpenseSource, ImportLine, User
 from app.schemas import ExpenseCreate, ExpenseRead, ExpenseUpdate
 from app.services.accounting import add_cash_expense_entry, amount_to_ars
 from app.services.audit import log_action
-from app.services.merchant_learning import learn_from_expense
+from app.services.merchant_learning import learn_from_expense, learn_mercadopago_expense
 from app.services.recurring import sync_recurring_rule
 
 router = APIRouter(prefix="/households/{home_group_id}/expenses", tags=["expenses"])
@@ -107,6 +107,7 @@ def update_expense(
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
 
     updates = payload.model_dump(exclude_unset=True)
+    previous_description = expense.description
     for field in ["date", "description", "category_id", "subcategory_id", "paid_by_user_id", "currency", "source", "notes", "is_recurring"]:
         if field in updates:
             setattr(expense, field, updates[field])
@@ -125,6 +126,12 @@ def update_expense(
     db.flush()
     add_cash_expense_entry(db, expense)
     learn_from_expense(db, expense)
+    learn_mercadopago_expense(
+        db,
+        expense,
+        description_changed="description" in updates and expense.description != previous_description,
+        categorization_submitted=bool({"category_id", "subcategory_id", "is_recurring"} & updates.keys()),
+    )
     sync_recurring_rule(db, expense)
     log_action(
         db,
@@ -152,6 +159,7 @@ def delete_expense(
     require_home_member(home_group_id, user, db)
     expense = db.get(Expense, expense_id)
     if expense and expense.home_group_id == home_group_id:
+        deleted_import_line_id = expense.import_line_id if expense.source == ExpenseSource.mercadopago else None
         log_action(
             db,
             home_group_id,
@@ -165,5 +173,11 @@ def delete_expense(
         )
         db.execute(delete(CashWalletEntry).where(CashWalletEntry.expense_id == expense.id))
         db.delete(expense)
+        db.flush()
+        if deleted_import_line_id is not None:
+            still_referenced = db.scalar(select(Expense.id).where(Expense.import_line_id == deleted_import_line_id))
+            still_referenced = still_referenced or db.scalar(select(Earning.id).where(Earning.import_line_id == deleted_import_line_id))
+            if still_referenced is None:
+                db.execute(delete(ImportLine).where(ImportLine.home_group_id == home_group_id, ImportLine.id == deleted_import_line_id))
         db.commit()
     return {"ok": True}

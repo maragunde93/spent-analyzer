@@ -5,7 +5,8 @@ param(
     [int]$PostgresPort = 5433,
     [switch]$Detached,
     [switch]$ResetData,
-    [switch]$Down
+    [switch]$Down,
+    [switch]$NoMercadoPagoHttpDebug
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +18,7 @@ $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) "spent-analyzer-$safeProje
 $composePath = Join-Path $tmpDir "docker-compose.demo.generated.yml"
 $backendContext = ((Resolve-Path (Join-Path $repoRoot "backend")).Path -replace "\\", "/")
 $frontendContext = ((Resolve-Path (Join-Path $repoRoot "frontend")).Path -replace "\\", "/")
+$mercadoPagoDebugHttpEnabled = if ($NoMercadoPagoHttpDebug) { "false" } else { "true" }
 
 New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 
@@ -56,6 +58,8 @@ services:
       SPENT_SESSION_COOKIE_SAMESITE: lax
       SPENT_SEED_DEMO_DATA: "true"
       SPENT_FX_AUTO_UPDATE_ENABLED: "false"
+      SPENT_MERCADOPAGO_DEBUG_HTTP_ENABLED: "__MERCADOPAGO_DEBUG_HTTP_ENABLED__"
+      SPENT_MERCADOPAGO_DEBUG_HTTP_MAX_CHARS: "12000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,7 +87,8 @@ $composeContent = $composeTemplate.
     Replace("__API_PORT__", [string]$ApiPort).
     Replace("__POSTGRES_PORT__", [string]$PostgresPort).
     Replace("__BACKEND_CONTEXT__", $backendContext).
-    Replace("__FRONTEND_CONTEXT__", $frontendContext)
+    Replace("__FRONTEND_CONTEXT__", $frontendContext).
+    Replace("__MERCADOPAGO_DEBUG_HTTP_ENABLED__", $mercadoPagoDebugHttpEnabled)
 
 Set-Content -LiteralPath $composePath -Value $composeContent -Encoding utf8
 
@@ -114,6 +119,7 @@ Write-Host "Starting demo stack with seeded fake data..."
 Write-Host "UI:  http://localhost:$WebPort/finance/"
 Write-Host "API: http://localhost:$ApiPort"
 Write-Host "Login: mauro / local-password-123"
+Write-Host "Mercado Pago HTTP debug: $mercadoPagoDebugHttpEnabled"
 Write-Host ""
 
 docker @upArgs

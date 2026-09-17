@@ -40,15 +40,18 @@ export type MercadoPagoIntegration = {
   last_sync_status: string | null;
   last_sync_error: string | null;
   last_report_file_name: string | null;
+  last_sync_started_at: string | null;
+  last_sync_completed_at: string | null;
+  last_sync_begin_date: string | null;
+  last_sync_end_date: string | null;
+  last_sync_imported: number | null;
+  last_sync_ignored: number | null;
+  last_sync_duplicates: number | null;
   updated_at: string | null;
 };
 
-export type MercadoPagoSyncResult = {
-  batch_id: number | null;
-  report_file_name: string;
-  imported: number;
-  ignored: number;
-  duplicates: number;
+export type MercadoPagoSyncAccepted = {
+  status: "running";
 };
 
 export type Expense = {

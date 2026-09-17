@@ -56,6 +56,12 @@ def ensure_incremental_schema() -> None:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN notes TEXT"))
             if "cardholder_name" not in import_columns:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN cardholder_name VARCHAR(160)"))
+            if "mercadopago_merchant_key" not in import_columns:
+                connection.execute(text("ALTER TABLE import_lines ADD COLUMN mercadopago_merchant_key VARCHAR(120)"))
+            if "mercadopago_collector_id" not in import_columns:
+                connection.execute(text("ALTER TABLE import_lines ADD COLUMN mercadopago_collector_id VARCHAR(80)"))
+            if "mercadopago_store_id" not in import_columns:
+                connection.execute(text("ALTER TABLE import_lines ADD COLUMN mercadopago_store_id VARCHAR(80)"))
             receipt_item_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(receipt_items)"))}
             if "status" not in receipt_item_columns:
                 connection.execute(text("ALTER TABLE receipt_items ADD COLUMN status VARCHAR(40) NOT NULL DEFAULT 'accepted'"))
@@ -109,6 +115,10 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS notes TEXT"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS cardholder_name VARCHAR(160)"))
+            connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS mercadopago_merchant_key VARCHAR(120)"))
+            connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS mercadopago_collector_id VARCHAR(80)"))
+            connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS mercadopago_store_id VARCHAR(80)"))
+            _ensure_postgres_mercadopago_runtime_schema(connection)
             connection.execute(text("ALTER TABLE receipt_items ADD COLUMN IF NOT EXISTS status VARCHAR(40) NOT NULL DEFAULT 'accepted'"))
             connection.execute(text("ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES categories(id)"))
             connection.execute(text("ALTER TABLE receipt_items ADD COLUMN IF NOT EXISTS subcategory_id INTEGER REFERENCES subcategories(id)"))
@@ -165,6 +175,75 @@ def _ensure_sqlite_mercadopago_schema(connection) -> None:
             """
         )
     )
+    integration_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(mercadopago_integrations)"))}
+    for column, definition in {
+        "last_sync_started_at": "DATETIME",
+        "last_sync_completed_at": "DATETIME",
+        "last_sync_begin_date": "DATETIME",
+        "last_sync_end_date": "DATETIME",
+        "last_sync_imported": "INTEGER",
+        "last_sync_ignored": "INTEGER",
+        "last_sync_duplicates": "INTEGER",
+    }.items():
+        if column not in integration_columns:
+            connection.execute(text(f"ALTER TABLE mercadopago_integrations ADD COLUMN {column} {definition}"))
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS mercadopago_merchant_rules (
+                id INTEGER PRIMARY KEY,
+                home_group_id INTEGER NOT NULL REFERENCES home_groups(id),
+                merchant_key VARCHAR(120) NOT NULL,
+                collector_id VARCHAR(80),
+                store_id VARCHAR(80),
+                learned_description VARCHAR(240),
+                has_category_override BOOLEAN NOT NULL DEFAULT 0,
+                category_id INTEGER REFERENCES categories(id),
+                subcategory_id INTEGER REFERENCES subcategories(id),
+                is_recurring BOOLEAN NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_mp_merchant_rule_home_key UNIQUE (home_group_id, merchant_key)
+            )
+            """
+        )
+    )
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_merchant_rules_home_group_id ON mercadopago_merchant_rules(home_group_id)"))
+
+
+def _ensure_postgres_mercadopago_runtime_schema(connection) -> None:
+    for column, definition in {
+        "last_sync_started_at": "TIMESTAMP",
+        "last_sync_completed_at": "TIMESTAMP",
+        "last_sync_begin_date": "TIMESTAMP",
+        "last_sync_end_date": "TIMESTAMP",
+        "last_sync_imported": "INTEGER",
+        "last_sync_ignored": "INTEGER",
+        "last_sync_duplicates": "INTEGER",
+    }.items():
+        connection.execute(text(f"ALTER TABLE mercadopago_integrations ADD COLUMN IF NOT EXISTS {column} {definition}"))
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS mercadopago_merchant_rules (
+                id SERIAL PRIMARY KEY,
+                home_group_id INTEGER NOT NULL REFERENCES home_groups(id),
+                merchant_key VARCHAR(120) NOT NULL,
+                collector_id VARCHAR(80),
+                store_id VARCHAR(80),
+                learned_description VARCHAR(240),
+                has_category_override BOOLEAN NOT NULL DEFAULT FALSE,
+                category_id INTEGER REFERENCES categories(id),
+                subcategory_id INTEGER REFERENCES subcategories(id),
+                is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_mp_merchant_rule_home_key UNIQUE (home_group_id, merchant_key)
+            )
+            """
+        )
+    )
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_merchant_rules_home_group_id ON mercadopago_merchant_rules(home_group_id)"))
     connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_integrations_home_group_id ON mercadopago_integrations(home_group_id)"))
     connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_integrations_user_id ON mercadopago_integrations(user_id)"))
 

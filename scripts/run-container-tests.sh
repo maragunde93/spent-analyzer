@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Keep this file LF-only; Docker executes it inside Linux.
 set -euo pipefail
 
 cd /workspace
