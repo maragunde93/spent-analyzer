@@ -24,6 +24,7 @@ def dashboard(
     end: date | None = None,
     paid_by_user_id: int | None = None,
     category_ids: list[int] = Query(default=[]),
+    is_shared: bool | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DashboardSummary:
@@ -38,6 +39,8 @@ def dashboard(
         stmt = stmt.where(Expense.paid_by_user_id == paid_by_user_id)
     if category_filter_ids:
         stmt = stmt.where(Expense.category_id.in_(category_filter_ids))
+    if is_shared is not None:
+        stmt = stmt.where(Expense.is_shared.is_(is_shared))
     expenses = [expense for expense in db.scalars(stmt) if not _is_non_consumption_expense(expense)]
     category_rows = list(db.scalars(select(Category).where(Category.home_group_id == home_group_id)))
     categories = {c.id: c.name for c in category_rows}
@@ -166,7 +169,7 @@ def dashboard(
             }
         )
     recurring.sort(key=lambda item: Decimal(item.get("sort_amount_ars", item["monthly_average"])), reverse=True)
-    if not recurring and not paid_by_user_id and not category_filter_ids:
+    if not recurring and not paid_by_user_id and not category_filter_ids and is_shared is None:
         recurring = [
             {
                 "description": rule.description_pattern,

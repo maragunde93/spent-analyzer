@@ -148,6 +148,83 @@ test("expenses can be filtered by original currency", async ({ page, request }) 
   await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toHaveCount(0);
 });
 
+test("new expenses use the selected date, current user, Mercado Pago debit, and filtered XLS export", async ({ page }) => {
+  await page.route("**/households/1/members", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([
+        { id: 2, email: "mica@example.test", display_name: "Mica", role: "member", consumption_count: 0 },
+        { id: 1, email: "mauro@example.test", display_name: "Mauro", role: "owner", consumption_count: 0 }
+      ])
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Consumos" }).click();
+  await expect(page.getByLabel("Pagado por", { exact: true })).toHaveValue("1");
+  await page.getByLabel("Fecha del gasto").fill("2026-09-03");
+  await page.getByLabel("Descripcion").fill("Debito MP exportable");
+  await page.getByLabel("Importe").fill("4321");
+  await page.getByLabel("Nota").fill("Nota visible sin desplegar");
+  await page.getByLabel("Origen").selectOption("mercadopago");
+  const created = page.waitForResponse((response) => response.url().includes("/households/1/expenses") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Agregar" }).click();
+  const createdResponse = await created;
+  expect(createdResponse.ok()).toBeTruthy();
+  const payload = await createdResponse.json() as { date: string; paid_by_user_id: number; source: string };
+  expect(payload).toMatchObject({ date: "2026-09-03", paid_by_user_id: 1, source: "mercadopago" });
+
+  await page.getByPlaceholder("Buscar gasto").fill("Debito MP exportable");
+  await expect(page.getByText("Nota visible sin desplegar")).toBeVisible();
+  await expect(page.getByLabel("Ver nota Debito MP exportable")).toHaveCount(0);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Descargar XLS \(1\)/ }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/^consumos-filtrados-\d{4}-\d{2}-\d{2}\.xls$/);
+  const stream = await download.createReadStream();
+  let contents = "";
+  for await (const chunk of stream) contents += chunk.toString();
+  expect(contents).toContain("Debito MP exportable");
+  expect(contents).toContain("2026-09-03");
+  expect(contents).toContain("Debito MercadoPago");
+  expect(contents).not.toContain("OPENAI *CHATGPT SUBSCR");
+});
+
+test("shared scope can be edited and filters expenses and dashboard", async ({ page, request }) => {
+  for (const [description, isShared] of [["Compra hogar compartida", true], ["Compra personal prueba", false]] as const) {
+    await request.post("http://127.0.0.1:8000/households/1/expenses", {
+      headers: { "X-Test-User-Email": "mauro@example.test" },
+      data: {
+        date: "2026-08-06",
+        description,
+        category_id: null,
+        paid_by_user_id: 1,
+        currency: "ARS",
+        original_amount: "1500.00",
+        source: "manual",
+        is_shared: isShared
+      }
+    });
+  }
+
+  await page.goto("/");
+  await page.getByLabel("Filtrar resumen por alcance").selectOption("shared");
+  await page.getByRole("button", { name: "Consumos" }).click();
+  await expect(page.getByLabel("Filtrar gastos por alcance")).toHaveValue("shared");
+  await expect(page.getByText("Compra hogar compartida")).toBeVisible();
+  await expect(page.getByText("Compra personal prueba")).toHaveCount(0);
+
+  await page.getByLabel("Filtrar gastos por alcance").selectOption("personal");
+  await expect(page.getByText("Compra hogar compartida")).toHaveCount(0);
+  await expect(page.getByText("Compra personal prueba")).toBeVisible();
+
+  await page.getByRole("button", { name: "Editar gasto Compra personal prueba" }).click();
+  await page.getByLabel("Editar alcance Compra personal prueba").selectOption("shared");
+  await page.getByRole("button", { name: "Guardar gasto Compra personal prueba" }).click();
+  await expect(page.getByText("Compra personal prueba")).toHaveCount(0);
+  await page.getByLabel("Filtrar gastos por alcance").selectOption("shared");
+  await expect(page.getByText("Compra personal prueba")).toBeVisible();
+});
+
 test("expense month groups can be collapsed while searching and after clearing search", async ({ page, request }) => {
   await request.post("http://127.0.0.1:8000/households/1/expenses", {
     headers: { "X-Test-User-Email": "mauro@example.test" },
@@ -399,6 +476,76 @@ test("account movement import classifies bank statement lines", async ({ page })
   await expect(page.getByRole("button", { name: /Procesar/ })).toBeVisible();
 });
 
+test("account import defaults to the logged user and restores edited descriptions until commit", async ({ page }) => {
+  const pendingBatch = {
+    id: 777,
+    filename: "cuenta-prueba.xls",
+    source_type: "bbva_account_xls",
+    uploaded_by_user_id: 1,
+    statement_account: "001-123456/7",
+    period_label: "2026-09",
+    statement_period: null,
+    card_network: null,
+    fx_rate_ars_per_usd: null,
+    status: "parsed",
+    created_at: "2026-09-18T12:00:00",
+    paid_by_user_ids: [],
+    lines: [{
+      id: 778,
+      date: "2026-09-05",
+      description: "TRANSFERENCIA DEBIN 1234",
+      cardholder_name: null,
+      coupon: null,
+      kind: "debit_purchase",
+      currency: "ARS",
+      original_amount: "125000.00",
+      suggested_category_id: null,
+      suggested_subcategory_id: null,
+      suggested_recurring: false,
+      suggested_shared: false,
+      notes: null,
+      status: "pending",
+      duplicate_status: "new"
+    }]
+  };
+  let committedPayload: { paid_by_user_id?: number; description_overrides?: Record<string, string> } | null = null;
+  await page.route("**/households/1/members", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([
+        { id: 2, email: "mica@example.test", display_name: "Mica", role: "member", consumption_count: 0 },
+        { id: 1, email: "mauro@example.test", display_name: "Mauro", role: "owner", consumption_count: 0 }
+      ])
+    });
+  });
+  await page.route("**/households/1/imports?status=parsed", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify([pendingBatch]) });
+  });
+  await page.route("**/households/1/imports/777/commit", async (route) => {
+    committedPayload = route.request().postDataJSON();
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ created: 1, processed: 1 }) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Carga de Resumenes" }).click();
+  await page.getByTestId("pending-import-777").getByRole("button", { name: "Continuar" }).click();
+  await expect(page.getByLabel("Pagador del resumen")).toHaveValue("1");
+  const descriptionInput = page.getByLabel("Descripcion TRANSFERENCIA DEBIN 1234");
+  await descriptionInput.fill("Alquiler septiembre");
+
+  await page.reload();
+  await page.getByRole("button", { name: "Carga de Resumenes" }).click();
+  await page.getByTestId("pending-import-777").getByRole("button", { name: "Continuar" }).click();
+  await expect(page.getByLabel("Descripcion TRANSFERENCIA DEBIN 1234")).toHaveValue("Alquiler septiembre");
+  await page.getByRole("button", { name: "Procesar 1 lineas" }).click();
+
+  expect(committedPayload).toMatchObject({
+    paid_by_user_id: 1,
+    description_overrides: { "778": "Alquiler septiembre" }
+  });
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("spent-analyzer:import-descriptions:1:777"))).toBeNull();
+});
+
 test("history import summary shows account statement coverage by month", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
@@ -568,6 +715,14 @@ test("user profile manages Mercado Pago integration with mocked API", async ({ p
   await page.getByLabel("Resumen", { exact: true }).click();
   await expect(page.getByText("Mercado Pago sincronizando")).toBeVisible();
   await expect(page.getByText("Mercado Pago sincronizando")).toHaveCount(0);
+  await page.getByRole("button", { name: "Carga de Resumenes" }).click();
+  await expect(page.getByRole("heading", { name: "Sincronizar Mercado Pago" })).toBeVisible();
+  await expect(page.getByLabel("Access Token Mercado Pago")).toHaveCount(0);
+  const importSyncButton = page.getByRole("button", { name: "Sincronizar Mercado Pago desde resumenes" });
+  await expect(importSyncButton).toBeEnabled();
+  await importSyncButton.click();
+  await expect(importSyncButton).toBeDisabled();
+  await expect(importSyncButton).toBeEnabled({ timeout: 5000 });
   await page.getByRole("button", { name: "Mauro" }).click();
   const defaultSyncDate = /^\d{4}-\d{2}-\d{2}$/;
   await expect(page.getByLabel("Desde Mercado Pago")).toHaveValue(defaultSyncDate);

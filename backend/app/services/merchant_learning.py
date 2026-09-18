@@ -16,6 +16,8 @@ class LearnedSuggestion:
     category_id: int | None
     subcategory_id: int | None
     is_recurring: bool
+    has_shared_override: bool
+    is_shared: bool
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,8 @@ class MercadoPagoLearnedRule:
     category_id: int | None
     subcategory_id: int | None
     is_recurring: bool
+    has_shared_override: bool
+    is_shared: bool
 
 
 def normalize_merchant_name(description: str) -> str:
@@ -50,10 +54,12 @@ def find_learned_suggestion(db: Session, home_group_id: int, description: str) -
         category_id=merchant.category_id,
         subcategory_id=merchant.subcategory_id,
         is_recurring=merchant.is_recurring,
+        has_shared_override=merchant.has_shared_override,
+        is_shared=merchant.is_shared,
     )
 
 
-def learn_from_expense(db: Session, expense: Expense) -> None:
+def learn_from_expense(db: Session, expense: Expense, *, learn_shared_scope: bool = True) -> None:
     normalized_name = normalize_merchant_name(expense.description)
     if not normalized_name:
         return
@@ -74,6 +80,9 @@ def learn_from_expense(db: Session, expense: Expense) -> None:
     merchant.category_id = expense.category_id
     merchant.subcategory_id = expense.subcategory_id
     merchant.is_recurring = bool(expense.is_recurring)
+    if learn_shared_scope:
+        merchant.has_shared_override = True
+        merchant.is_shared = bool(expense.is_shared)
 
 
 def find_mercadopago_rule(db: Session, home_group_id: int, merchant_key: str | None) -> MercadoPagoLearnedRule | None:
@@ -93,6 +102,8 @@ def find_mercadopago_rule(db: Session, home_group_id: int, merchant_key: str | N
         category_id=rule.category_id,
         subcategory_id=rule.subcategory_id,
         is_recurring=rule.is_recurring,
+        has_shared_override=rule.has_shared_override,
+        is_shared=rule.is_shared,
     )
 
 
@@ -102,6 +113,7 @@ def learn_mercadopago_expense(
     *,
     description_changed: bool,
     categorization_submitted: bool,
+    shared_scope_submitted: bool,
 ) -> None:
     if expense.source != ExpenseSource.mercadopago or expense.import_line_id is None:
         return
@@ -129,3 +141,6 @@ def learn_mercadopago_expense(
         rule.category_id = expense.category_id
         rule.subcategory_id = expense.subcategory_id
         rule.is_recurring = bool(expense.is_recurring)
+    if shared_scope_submitted:
+        rule.has_shared_override = True
+        rule.is_shared = bool(expense.is_shared)

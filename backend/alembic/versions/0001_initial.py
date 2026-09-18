@@ -122,6 +122,8 @@ def upgrade() -> None:
         sa.Column("category_id", sa.Integer(), sa.ForeignKey("categories.id"), nullable=True),
         sa.Column("subcategory_id", sa.Integer(), sa.ForeignKey("subcategories.id"), nullable=True),
         sa.Column("is_recurring", sa.Boolean(), nullable=False),
+        sa.Column("has_shared_override", sa.Boolean(), nullable=False),
+        sa.Column("is_shared", sa.Boolean(), nullable=False),
         sa.UniqueConstraint("home_group_id", "normalized_name", name="uq_merchant_home_name"),
     )
 
@@ -137,6 +139,8 @@ def upgrade() -> None:
         sa.Column("category_id", sa.Integer(), sa.ForeignKey("categories.id"), nullable=True),
         sa.Column("subcategory_id", sa.Integer(), sa.ForeignKey("subcategories.id"), nullable=True),
         sa.Column("is_recurring", sa.Boolean(), nullable=False),
+        sa.Column("has_shared_override", sa.Boolean(), nullable=False),
+        sa.Column("is_shared", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.UniqueConstraint("home_group_id", "merchant_key", name="uq_mp_merchant_rule_home_key"),
@@ -153,6 +157,7 @@ def upgrade() -> None:
         sa.Column("statement_account", sa.String(length=80), nullable=True),
         sa.Column("period_label", sa.String(length=80), nullable=True),
         sa.Column("statement_period", sa.String(length=7), nullable=True),
+        sa.Column("card_network", sa.String(length=40), nullable=True),
         sa.Column("fx_rate_ars_per_usd", sa.Numeric(14, 4), nullable=True),
         sa.Column("status", sa.String(length=40), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
@@ -174,6 +179,7 @@ def upgrade() -> None:
         sa.Column("suggested_category_id", sa.Integer(), sa.ForeignKey("categories.id"), nullable=True),
         sa.Column("suggested_subcategory_id", sa.Integer(), sa.ForeignKey("subcategories.id"), nullable=True),
         sa.Column("suggested_recurring", sa.Boolean(), nullable=False),
+        sa.Column("suggested_shared", sa.Boolean(), nullable=False),
         sa.Column("notes", sa.Text(), nullable=True),
         sa.Column("status", sa.String(length=40), nullable=False),
         sa.Column("fingerprint", sa.String(length=128), nullable=False),
@@ -202,6 +208,7 @@ def upgrade() -> None:
         sa.Column("import_line_id", sa.Integer(), sa.ForeignKey("import_lines.id"), nullable=True),
         sa.Column("notes", sa.Text(), nullable=True),
         sa.Column("is_recurring", sa.Boolean(), nullable=False),
+        sa.Column("is_shared", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
     )
     op.create_index(op.f("ix_expenses_home_group_id"), "expenses", ["home_group_id"], unique=False)

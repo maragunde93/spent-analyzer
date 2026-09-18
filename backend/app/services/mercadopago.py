@@ -18,7 +18,7 @@ from app.domain import Currency, ExpenseSource, ImportLineKind
 from app.models import Category, Earning, Expense, ImportBatch, ImportLine, MercadoPagoIntegration, Subcategory
 from app.services.accounting import amount_to_ars
 from app.services.audit import log_action
-from app.services.categorizer import suggest_category
+from app.services.categorizer import suggest_category, suggest_shared
 from app.services.merchant_learning import find_learned_suggestion, find_mercadopago_rule, learn_from_expense
 from app.services.recurring import should_suggest_recurring, sync_recurring_rule
 
@@ -627,10 +627,11 @@ def import_movements(
 
         rule = find_mercadopago_rule(db, integration.home_group_id, movement.merchant_key)
         description = rule.description if rule and rule.description else movement.description
+        category_id, subcategory_id, recurring, shared = _suggest_movement(db, integration.home_group_id, description)
         if rule and rule.has_category_override:
             category_id, subcategory_id, recurring = rule.category_id, rule.subcategory_id, rule.is_recurring
-        else:
-            category_id, subcategory_id, recurring = _suggest_movement(db, integration.home_group_id, description)
+        if rule and rule.has_shared_override:
+            shared = rule.is_shared
         line = ImportLine(
             import_batch_id=batch.id,
             home_group_id=integration.home_group_id,
@@ -644,6 +645,7 @@ def import_movements(
             suggested_category_id=category_id,
             suggested_subcategory_id=subcategory_id,
             suggested_recurring=recurring,
+            suggested_shared=shared,
             notes=movement.ignored_reason,
             status="ignored" if movement.ignored_reason else "committed",
             fingerprint=fingerprint,
@@ -780,6 +782,7 @@ def _create_expense(db: Session, integration: MercadoPagoIntegration, line: Impo
         import_line_id=line.id,
         notes=line.notes,
         is_recurring=line.suggested_recurring and original_amount > 0,
+        is_shared=line.suggested_shared,
     )
     db.add(expense)
     db.flush()
@@ -858,13 +861,15 @@ def _should_replace_existing_description(current: str | None, candidate: str) ->
     )
 
 
-def _suggest_movement(db: Session, home_group_id: int, description: str) -> tuple[int | None, int | None, bool]:
+def _suggest_movement(db: Session, home_group_id: int, description: str) -> tuple[int | None, int | None, bool, bool]:
     learned = find_learned_suggestion(db, home_group_id, description)
     if learned and learned.category_id is not None:
+        category_name = db.scalar(select(Category.name).where(Category.id == learned.category_id))
         return (
             learned.category_id,
             learned.subcategory_id,
             learned.is_recurring or should_suggest_recurring(db, home_group_id, description, learned.category_id),
+            learned.is_shared if learned.has_shared_override else suggest_shared(description, category_name),
         )
     categories = {category.name: category.id for category in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = {
@@ -873,7 +878,12 @@ def _suggest_movement(db: Session, home_group_id: int, description: str) -> tupl
     }
     suggestion = suggest_category(description)
     category_id = categories.get(suggestion.name) if suggestion else None
-    return category_id, _suggest_subcategory_id(description, category_id, subcategories), should_suggest_recurring(db, home_group_id, description, category_id)
+    return (
+        category_id,
+        _suggest_subcategory_id(description, category_id, subcategories),
+        should_suggest_recurring(db, home_group_id, description, category_id),
+        learned.is_shared if learned and learned.has_shared_override else suggest_shared(description, suggestion.name if suggestion else None),
+    )
 
 
 def _suggest_subcategory_id(description: str, category_id: int | None, subcategories: dict[tuple[int, str], int]) -> int | None:

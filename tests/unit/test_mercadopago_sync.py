@@ -642,13 +642,15 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         update_expense(
             self.home.id,
             first.id,
-            ExpenseUpdate(description="Supermercado", category_id=self.delivery.id, subcategory_id=None, is_recurring=False),
+            ExpenseUpdate(description="Supermercado", category_id=self.delivery.id, subcategory_id=None, is_recurring=False, is_shared=True),
             self.user,
             self.db,
         )
         rule = self.db.scalar(select(MercadoPagoMerchantRule).where(MercadoPagoMerchantRule.merchant_key == "collector:777"))
         self.assertEqual(rule.learned_description, "Supermercado")
         self.assertEqual(rule.category_id, self.delivery.id)
+        self.assertTrue(rule.has_shared_override)
+        self.assertTrue(rule.is_shared)
         first.notes = 'Tipo Mercado Pago: "Varios"'
         self.db.commit()
 
@@ -693,6 +695,7 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(descriptions, ["Supermercado", "Supermercado"])
         newest = self.db.scalar(select(Expense).where(Expense.import_line_id != first.import_line_id))
         self.assertEqual(newest.category_id, self.delivery.id)
+        self.assertTrue(newest.is_shared)
         self.assertIsNone(newest.notes)
 
         await sync_integration(

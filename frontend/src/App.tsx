@@ -10,11 +10,11 @@ import {
   CircleDollarSign,
   Copy,
   ClipboardList,
+  Download,
   History as HistoryIcon,
   Home,
   LoaderCircle,
   LogOut,
-  MessageSquare,
   PiggyBank,
   Plus,
   ReceiptText,
@@ -32,7 +32,7 @@ import {
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Customized, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, apiFallbacksEnabled } from "./api";
 import { categories as fallbackCategories, users as fallbackUsers } from "./mockData";
-import type { Category, Currency, DashboardSummary, Expense, ExpenseSource, ImportBatch, ImportLine, MercadoPagoIntegration, ReceiptImport, ReceiptItem, User } from "./types";
+import type { Category, Currency, DashboardSummary, Expense, ExpenseSource, ImportBatch, ImportLine, MercadoPagoIntegration, ReceiptImport, ReceiptItem, SharedScope, User } from "./types";
 
 function money(value: string | number, currency = "ARS") {
   return new Intl.NumberFormat("es-AR", {
@@ -70,6 +70,19 @@ const legendOrder = [
   "Regalos",
   "Sin categoria"
 ];
+
+const sharedDescriptionTokens = ["SUPERMERC", "CARREFOUR", "COTO", "JUMBO", "DISCO", "CHANGOMAS", "CHANGO MAS", "VEA ", "DIA %", "DIA ONLINE", "CARNICER", "FRIGORIFICO", "VERDULER"];
+const personalServiceTokens = ["OPENAI", "CHATGPT", "TELEFONIA MOVIL", "TELEFONO MOVIL", "LINEA MOVIL", "MOVISTAR MOVIL", "CLARO MOVIL", "PERSONAL FLOW MOVIL", "TUENTI"];
+const mobileProviderTokens = ["MOVISTAR", "CLARO", "PERSONAL", "TUENTI"];
+const homeServiceTokens = ["HOGAR", "FIBRA", "INTERNET", "BANDA ANCHA", "FLOW"];
+
+function initialSharedSuggestion(description: string, categoryName?: string) {
+  const normalized = description.toUpperCase();
+  if (personalServiceTokens.some((token) => normalized.includes(token))) return false;
+  if (mobileProviderTokens.some((token) => normalized.includes(token)) && !homeServiceTokens.some((token) => normalized.includes(token))) return false;
+  if (categoryName === "Servicios") return true;
+  return sharedDescriptionTokens.some((token) => normalized.includes(token));
+}
 
 function toChartRows(rows: Array<Record<string, string>>) {
   return rows.map((row) =>
@@ -135,6 +148,68 @@ function currentMonthPeriod(now = new Date()) {
 
 function currentDateInputValue(now = new Date()) {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function spreadsheetXmlValue(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function downloadExpensesXls(expenses: Expense[], categories: Category[], users: User[]) {
+  const headers = ["Fecha", "Descripcion", "Pagado por", "Categoria", "Subcategoria", "Origen", "Alcance", "Recurrente", "Moneda", "Importe original", "Importe ARS", "Nota"];
+  const rows = expenses.map((expense) => {
+    const category = categories.find((item) => item.id === expense.category_id);
+    const subcategory = category?.subcategories?.find((item) => item.id === expense.subcategory_id);
+    return [
+      expense.date,
+      expense.description,
+      users.find((item) => item.id === expense.paid_by_user_id)?.display_name ?? `Usuario #${expense.paid_by_user_id}`,
+      category?.name ?? "Sin categoria",
+      subcategory?.name ?? "",
+      sourceLabel(expense.source),
+      expense.is_shared ? "Compartido" : "Personal",
+      expense.is_recurring ? "Si" : "No",
+      expense.currency,
+      expense.original_amount,
+      expense.amount_ars,
+      expense.notes ?? ""
+    ];
+  });
+  const xmlRows = [headers, ...rows]
+    .map((row) => `<Row>${row.map((value) => `<Cell><Data ss:Type="String">${spreadsheetXmlValue(value)}</Data></Cell>`).join("")}</Row>`)
+    .join("");
+  const workbook = `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="Consumos"><Table>${xmlRows}</Table></Worksheet></Workbook>`;
+  const url = URL.createObjectURL(new Blob(["\ufeff", workbook], { type: "application/vnd.ms-excel;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `consumos-filtrados-${currentDateInputValue()}.xls`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function importDescriptionStorageKey(homeId: number, batchId: number) {
+  return `spent-analyzer:import-descriptions:${homeId}:${batchId}`;
+}
+
+function storedImportDescriptions(homeId: number, batchId: number) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(importDescriptionStorageKey(homeId, batchId)) ?? "{}") as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length <= 240)
+    ) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function clearStoredImportDescriptions(homeId: number, batchId: number) {
+  window.localStorage.removeItem(importDescriptionStorageKey(homeId, batchId));
 }
 
 function shiftMonthPeriod(period: string, offset: number) {
@@ -229,7 +304,7 @@ function formatCurrencyTotals(totals: Partial<Record<Currency, number>>) {
     .join(" / ") || money(0);
 }
 
-type ExpenseSortKey = "date" | "description" | "paid_by" | "category" | "source" | "recurring" | "amount" | "notes";
+type ExpenseSortKey = "date" | "description" | "paid_by" | "category" | "source" | "shared" | "recurring" | "amount" | "notes";
 type ExpenseSort = { key: ExpenseSortKey; direction: "asc" | "desc" };
 type AverageSortKey = "category" | "currentMonth" | "lastMonth" | "average6";
 type AverageSort = { key: AverageSortKey; direction: "asc" | "desc" };
@@ -260,6 +335,7 @@ function expenseSortValue(expense: Expense, key: ExpenseSortKey, categories: Cat
     paid_by: user?.display_name ?? "",
     category: `${category?.name ?? "Sin categoria"} ${subcategory?.name ?? ""}`,
     source: sourceLabel(expense.source),
+    shared: expense.is_shared,
     recurring: !!expense.is_recurring,
     amount: Number(expense.original_amount),
     notes: expense.notes ?? ""
@@ -562,13 +638,14 @@ export function App() {
   const [query, setQuery] = useState("");
   const [paidBy, setPaidBy] = useState("all");
   const [expenseCurrency, setExpenseCurrency] = useState<"all" | Currency>("all");
+  const [sharedScope, setSharedScope] = useState<SharedScope>("all");
   const [dashboardCategoryIds, setDashboardCategoryIds] = useState<number[]>([]);
   const queryClient = useQueryClient();
   const currentUser = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
   const households = useQuery({ queryKey: ["households"], queryFn: api.households, enabled: !!currentUser.data });
   const homeId = households.data?.[0]?.id ?? 1;
   const members = useQuery({ queryKey: ["members", homeId], queryFn: () => api.members(homeId), enabled: !!currentUser.data });
-  const dashboard = useQuery({ queryKey: ["dashboard", homeId, paidBy, dashboardCategoryIds.join(",")], queryFn: () => api.dashboard(homeId, paidBy, dashboardCategoryIds), enabled: !!currentUser.data });
+  const dashboard = useQuery({ queryKey: ["dashboard", homeId, paidBy, dashboardCategoryIds.join(","), sharedScope], queryFn: () => api.dashboard(homeId, paidBy, dashboardCategoryIds, sharedScope), enabled: !!currentUser.data });
   const expenses = useQuery({ queryKey: ["expenses", homeId], queryFn: () => api.expenses(homeId), enabled: !!currentUser.data });
   const categoryQuery = useQuery({ queryKey: ["categories", homeId], queryFn: () => api.categories(homeId), enabled: !!currentUser.data });
   const mercadoPago = useQuery({
@@ -631,9 +708,10 @@ export function App() {
       const matchesText = haystack.includes(query.toLowerCase());
       const matchesUser = paidBy === "all" || String(expense.paid_by_user_id) === paidBy;
       const matchesCurrency = expenseCurrency === "all" || expense.currency === expenseCurrency;
-      return matchesText && matchesUser && matchesCurrency;
+      const matchesShared = sharedScope === "all" || expense.is_shared === (sharedScope === "shared");
+      return matchesText && matchesUser && matchesCurrency && matchesShared;
     });
-  }, [expenses.data, cats, query, paidBy, expenseCurrency]);
+  }, [expenses.data, cats, query, paidBy, expenseCurrency, sharedScope]);
 
   if (currentUser.isLoading) return <LoadingScreen />;
   if (currentUser.isError || !currentUser.data) return <LoginScreen />;
@@ -691,6 +769,8 @@ export function App() {
             setPaidBy={setPaidBy}
             categoryIds={dashboardCategoryIds}
             setCategoryIds={setDashboardCategoryIds}
+            sharedScope={sharedScope}
+            setSharedScope={setSharedScope}
           />
         )}
         {section === "expenses" && (
@@ -698,6 +778,7 @@ export function App() {
             categories={cats}
             expenses={filteredExpenses}
             users={people}
+            currentUserId={authenticatedUser.id}
             onAdd={(payload) => addExpense.mutate(payload)}
             onUpdate={(id, payload) => updateExpense.mutate({ id, payload })}
             onDelete={(id) => deleteExpense.mutate(id)}
@@ -706,10 +787,12 @@ export function App() {
             query={query}
             setPaidBy={setPaidBy}
             setCurrencyFilter={setExpenseCurrency}
+            sharedScope={sharedScope}
+            setSharedScope={setSharedScope}
             setQuery={setQuery}
           />
         )}
-        {section === "imports" && <Imports categories={cats} users={people} homeId={homeId} />}
+        {section === "imports" && <Imports categories={cats} users={people} currentUser={authenticatedUser} homeId={homeId} />}
         {section === "cash" && <CashWallet users={people} homeId={homeId} />}
         {section === "history" && <HistoryPanel users={people} homeId={homeId} />}
         {section === "receipts" && <ReceiptsLab categories={cats} expenses={expenses.data ?? []} homeId={homeId} />}
@@ -1009,6 +1092,47 @@ function MercadoPagoSelfPanel({ currentUser, homeId }: { currentUser: User; home
   );
 }
 
+function MercadoPagoImportSync({ currentUser, homeId }: { currentUser: User; homeId: number }) {
+  const queryClient = useQueryClient();
+  const mercadoPago = useQuery({ queryKey: ["mercadopago", homeId], queryFn: () => api.mercadoPagoIntegrations(homeId) });
+  const integration = (mercadoPago.data ?? []).find((item) => item.user_id === currentUser.id);
+  const backendSyncing = integration?.last_sync_status === "running";
+  const syncMercadoPago = useMutation({
+    mutationKey: ["mercadopago-sync", homeId, currentUser.id],
+    mutationFn: () => api.syncMercadoPago(homeId, currentUser.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
+    }
+  });
+  return (
+    <div className="panel import-drop mp-import-card">
+      <div>
+        <h2>Sincronizar Mercado Pago</h2>
+        <p>
+          {integration?.connected
+            ? `Importa los movimientos nuevos de ${integration.mp_nickname || currentUser.display_name}.`
+            : "Conecta tu cuenta y administra el token desde Mi usuario."}
+        </p>
+        {integration?.last_sync_status === "ok" && (
+          <small className="muted">Ultima sync: {integration.last_sync_imported ?? 0} importados, {integration.last_sync_duplicates ?? 0} duplicados.</small>
+        )}
+        {integration?.last_sync_status === "error" && integration.last_sync_error && <small className="form-error">{integration.last_sync_error}</small>}
+        {syncMercadoPago.isError && <small className="form-error">{syncMercadoPago.error.message}</small>}
+      </div>
+      <button
+        className="primary"
+        type="button"
+        disabled={!integration?.connected || syncMercadoPago.isPending || backendSyncing}
+        onClick={() => syncMercadoPago.mutate()}
+        aria-label="Sincronizar Mercado Pago desde resumenes"
+      >
+        {syncMercadoPago.isPending || backendSyncing ? <LoaderCircle className="spin" size={16} /> : <CalendarClock size={16} />}
+        {syncMercadoPago.isPending || backendSyncing ? "Sincronizando Mercado Pago" : "Sincronizar Mercado Pago"}
+      </button>
+    </div>
+  );
+}
+
 function FxRateBadge({
   fxRate
 }: {
@@ -1073,7 +1197,9 @@ function Dashboard({
   paidBy,
   setPaidBy,
   categoryIds,
-  setCategoryIds
+  setCategoryIds,
+  sharedScope,
+  setSharedScope
 }: {
   categories: Array<Pick<Category, "id" | "name" | "color">>;
   data?: Awaited<ReturnType<typeof api.dashboard>>;
@@ -1082,6 +1208,8 @@ function Dashboard({
   setPaidBy: (value: string) => void;
   categoryIds: number[];
   setCategoryIds: (value: number[]) => void;
+  sharedScope: SharedScope;
+  setSharedScope: (value: SharedScope) => void;
 }) {
   const [activeMonthlyCategory, setActiveMonthlyCategory] = useState<string | null>(null);
   const [activeLegendCategory, setActiveLegendCategory] = useState<string | null>(null);
@@ -1150,6 +1278,14 @@ function Dashboard({
             <select value={paidBy} onChange={(event) => setPaidBy(event.target.value)} aria-label="Filtrar resumen por usuario">
               <option value="all">Todo el hogar</option>
               {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Alcance</span>
+            <select value={sharedScope} onChange={(event) => setSharedScope(event.target.value as SharedScope)} aria-label="Filtrar resumen por alcance">
+              <option value="all">Todos</option>
+              <option value="shared">Compartidos</option>
+              <option value="personal">Personales</option>
             </select>
           </label>
         </div>
@@ -1720,24 +1856,30 @@ function Expenses(props: {
   categories: Category[];
   expenses: Expense[];
   users: User[];
+  currentUserId: number;
   query: string;
   paidBy: string;
   currencyFilter: "all" | Currency;
+  sharedScope: SharedScope;
   setQuery: (value: string) => void;
   setPaidBy: (value: string) => void;
   setCurrencyFilter: (value: "all" | Currency) => void;
+  setSharedScope: (value: SharedScope) => void;
   onAdd: (payload: Partial<Expense>) => void;
   onUpdate: (id: number, payload: Partial<Expense>) => void;
   onDelete: (id: number) => void;
 }) {
+  const [expenseDate, setExpenseDate] = useState(() => currentDateInputValue());
   const [amount, setAmount] = useState("0");
   const [description, setDescription] = useState("");
   const [notes, setNotes] = useState("");
-  const [paidByUserId, setPaidByUserId] = useState(String(props.users[0]?.id ?? 1));
+  const [paidByUserId, setPaidByUserId] = useState(String(props.currentUserId));
   const [categoryId, setCategoryId] = useState(String(props.categories[0]?.id ?? ""));
   const [subcategoryId, setSubcategoryId] = useState("");
   const [source, setSource] = useState<ExpenseSource>("cash");
   const [isRecurring, setIsRecurring] = useState(false);
+  const [isShared, setIsShared] = useState(false);
+  const [sharedTouched, setSharedTouched] = useState(false);
   const [editingExpenseId, setEditingExpenseId] = useState<number | null>(null);
   const [editDescription, setEditDescription] = useState("");
   const [editAmount, setEditAmount] = useState("");
@@ -1745,7 +1887,7 @@ function Expenses(props: {
   const [editSubcategoryId, setEditSubcategoryId] = useState("");
   const [editNotes, setEditNotes] = useState("");
   const [editIsRecurring, setEditIsRecurring] = useState(false);
-  const [openNoteId, setOpenNoteId] = useState<number | null>(null);
+  const [editIsShared, setEditIsShared] = useState(false);
   const [expandedMonths, setExpandedMonths] = useState<Record<string, boolean>>({});
   const [sort, setSort] = useState<ExpenseSort>({ key: "date", direction: "desc" });
   const selectedCategory = props.categories.find((category) => String(category.id) === categoryId);
@@ -1754,10 +1896,13 @@ function Expenses(props: {
   const groupedExpenses = groupExpensesByMonth(props.expenses);
   const visibleTotals = totalsByCurrency(props.expenses);
   const periods = Object.keys(groupedExpenses).sort().reverse();
-  const hasActiveFilters = !!props.query.trim() || props.paidBy !== "all" || props.currencyFilter !== "all";
-  const activeFilterKey = `${props.query.trim().toLowerCase()}|${props.paidBy}|${props.currencyFilter}`;
+  const hasActiveFilters = !!props.query.trim() || props.paidBy !== "all" || props.currencyFilter !== "all" || props.sharedScope !== "all";
+  const activeFilterKey = `${props.query.trim().toLowerCase()}|${props.paidBy}|${props.currencyFilter}|${props.sharedScope}`;
   const periodKey = periods.join("|");
   const previousFilterKey = useRef(activeFilterKey);
+  useEffect(() => {
+    setPaidByUserId(String(props.currentUserId));
+  }, [props.currentUserId]);
   useEffect(() => {
     const filterChanged = previousFilterKey.current !== activeFilterKey;
     previousFilterKey.current = activeFilterKey;
@@ -1794,6 +1939,7 @@ function Expenses(props: {
     setEditSubcategoryId(expense.subcategory_id ? String(expense.subcategory_id) : "");
     setEditNotes(expense.notes ?? "");
     setEditIsRecurring(!!expense.is_recurring);
+    setEditIsShared(expense.is_shared);
   };
   return (
     <section className="stack">
@@ -1820,13 +1966,29 @@ function Expenses(props: {
                 <option value="USD">USD</option>
               </select>
             </label>
+            <label>
+              <span>Alcance</span>
+              <select value={props.sharedScope} onChange={(e) => props.setSharedScope(e.target.value as SharedScope)} aria-label="Filtrar gastos por alcance">
+                <option value="all">Todos</option>
+                <option value="shared">Compartidos</option>
+                <option value="personal">Personales</option>
+              </select>
+            </label>
+            <button
+              className="primary"
+              type="button"
+              disabled={!props.expenses.length}
+              onClick={() => downloadExpensesXls(props.expenses, props.categories, props.users)}
+            >
+              <Download size={16} /> Descargar XLS ({props.expenses.length})
+            </button>
           </div>
           <form
             className="panel form-panel"
             onSubmit={(e) => {
               e.preventDefault();
               props.onAdd({
-                date: new Date().toISOString().slice(0, 10),
+                date: expenseDate,
                 description,
                 paid_by_user_id: Number(paidByUserId),
                 category_id: categoryId ? Number(categoryId) : null,
@@ -1835,17 +1997,27 @@ function Expenses(props: {
                 currency: "ARS" as Currency,
                 original_amount: amount,
                 notes: notes.trim() || null,
-                is_recurring: isRecurring
+                is_recurring: isRecurring,
+                is_shared: isShared
               });
               setDescription("");
               setAmount("0");
               setNotes("");
               setSubcategoryId("");
               setIsRecurring(false);
+              setIsShared(false);
+              setSharedTouched(false);
             }}
           >
             <h2>Nuevo gasto</h2>
-            <input value={description} onChange={(e) => setDescription(e.target.value)} aria-label="Descripcion" placeholder="Descripcion" />
+            <label className="statement-period-control">
+              <span>Fecha del gasto</span>
+              <input type="date" value={expenseDate} onChange={(e) => setExpenseDate(e.target.value)} aria-label="Fecha del gasto" required />
+            </label>
+            <input value={description} onChange={(e) => {
+              setDescription(e.target.value);
+              if (!sharedTouched) setIsShared(initialSharedSuggestion(e.target.value, selectedCategory?.name));
+            }} aria-label="Descripcion" placeholder="Descripcion" />
             <input value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="Importe" inputMode="decimal" />
             <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagado por">
               {props.users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
@@ -1855,6 +2027,7 @@ function Expenses(props: {
               setCategoryId(e.target.value);
               setSubcategoryId("");
               if (nextCategory?.name === "Suscripciones" || nextCategory?.name === "Servicios") setIsRecurring(true);
+              if (!sharedTouched) setIsShared(initialSharedSuggestion(description, nextCategory?.name));
             }} aria-label="Categoria">
               {props.categories.map((c) => <option value={c.id} key={c.id}>{c.name}</option>)}
             </select>
@@ -1865,11 +2038,16 @@ function Expenses(props: {
             <select value={source} onChange={(e) => setSource(e.target.value as ExpenseSource)} aria-label="Origen">
               <option value="cash">Efectivo</option>
               <option value="transfer">Transferencia</option>
+              <option value="mercadopago">Debito MercadoPago</option>
               <option value="other">Otro</option>
             </select>
             <label className="check-row form-check">
               <input type="checkbox" checked={isRecurring} onChange={(event) => setIsRecurring(event.target.checked)} />
               Recurrente
+            </label>
+            <label className="check-row form-check">
+              <input type="checkbox" checked={isShared} onChange={(event) => { setIsShared(event.target.checked); setSharedTouched(true); }} />
+              Compartido con el hogar
             </label>
             <textarea value={notes} onChange={(e) => setNotes(e.target.value.slice(0, 500))} aria-label="Nota" placeholder="Nota opcional" maxLength={500} />
             <button className="primary" type="submit"><Plus size={16} /> Agregar</button>
@@ -1902,6 +2080,7 @@ function Expenses(props: {
               <col className="expense-paid-col" />
               <col className="expense-category-col" />
               <col className="expense-source-col" />
+              <col className="expense-shared-col" />
               <col className="expense-recurring-col" />
               <col className="expense-amount-col" />
               <col className="expense-note-col" />
@@ -1914,6 +2093,7 @@ function Expenses(props: {
                 <th><button className="sort-header" onClick={() => updateSort("paid_by")}>Pago{sortIndicator(sort, "paid_by")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("category")}>Categoria{sortIndicator(sort, "category")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("source")}>Origen{sortIndicator(sort, "source")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("shared")}>Alcance{sortIndicator(sort, "shared")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("recurring")}>Recurrente{sortIndicator(sort, "recurring")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("amount")}>Importe{sortIndicator(sort, "amount")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("notes")}>Nota{sortIndicator(sort, "notes")}</button></th>
@@ -1929,7 +2109,7 @@ function Expenses(props: {
                 return (
                   <Fragment key={period}>
                     <tr className="month-group-row">
-                      <td colSpan={9}>
+                      <td colSpan={10}>
                         <button
                           className="month-toggle"
                           onClick={() => setExpandedMonths((current) => ({ ...current, [period]: !expanded }))}
@@ -1946,7 +2126,6 @@ function Expenses(props: {
                       const cat = props.categories.find((c) => c.id === expense.category_id);
                       const subcat = cat?.subcategories?.find((subcategory) => subcategory.id === expense.subcategory_id);
                       const isEditing = editingExpenseId === expense.id;
-                      const hasNotes = !!expense.notes?.trim();
                       return (
                         <Fragment key={expense.id}>
                           <tr className={!expense.category_id ? "needs-review-row" : undefined}>
@@ -1999,6 +2178,16 @@ function Expenses(props: {
                             <td>{sourceLabel(expense.source)}</td>
                             <td>
                               {isEditing ? (
+                                <select value={editIsShared ? "shared" : "personal"} onChange={(event) => setEditIsShared(event.target.value === "shared")} aria-label={`Editar alcance ${expense.description}`}>
+                                  <option value="shared">Compartido</option>
+                                  <option value="personal">Personal</option>
+                                </select>
+                              ) : (
+                                <span className={expense.is_shared ? "chip shared-chip" : "chip"}>{expense.is_shared ? "Compartido" : "Personal"}</span>
+                              )}
+                            </td>
+                            <td>
+                              {isEditing ? (
                                 <input type="checkbox" checked={editIsRecurring} onChange={(event) => setEditIsRecurring(event.target.checked)} aria-label={`Editar recurrente ${expense.description}`} />
                               ) : (
                                 <input
@@ -2019,12 +2208,8 @@ function Expenses(props: {
                             <td className="note-cell">
                               {isEditing ? (
                                 <textarea className="note-edit" value={editNotes} onChange={(event) => setEditNotes(event.target.value.slice(0, 500))} aria-label={`Editar nota ${expense.description}`} maxLength={500} />
-                              ) : hasNotes ? (
-                                <button className="icon-button" title="Ver nota" aria-label={`Ver nota ${expense.description}`} onClick={() => setOpenNoteId(openNoteId === expense.id ? null : expense.id)}>
-                                  <MessageSquare size={16} />
-                                </button>
                               ) : (
-                                <span className="muted">-</span>
+                                <span className={expense.notes?.trim() ? "note-value" : "muted"}>{expense.notes?.trim() || "-"}</span>
                               )}
                             </td>
                             <td className="actions-cell">
@@ -2042,7 +2227,8 @@ function Expenses(props: {
                                         subcategory_id: editSubcategoryId ? Number(editSubcategoryId) : null,
                                         original_amount: editAmount,
                                         notes: editNotes.trim() || null,
-                                        is_recurring: editIsRecurring
+                                        is_recurring: editIsRecurring,
+                                        is_shared: editIsShared
                                       });
                                       setEditingExpenseId(null);
                                     }}
@@ -2074,11 +2260,6 @@ function Expenses(props: {
                               )}
                             </td>
                           </tr>
-                          {openNoteId === expense.id && hasNotes && (
-                            <tr className="note-row">
-                              <td colSpan={9}>{expense.notes}</td>
-                            </tr>
-                          )}
                         </Fragment>
                       );
                     })}
@@ -2093,32 +2274,56 @@ function Expenses(props: {
   );
 }
 
-function Imports({ categories, users, homeId }: { categories: Category[]; users: User[]; homeId: number }) {
+function Imports({ categories, users, currentUser, homeId }: { categories: Category[]; users: User[]; currentUser: User; homeId: number }) {
   const [batch, setBatch] = useState<ImportBatch | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
   const [categoryByLine, setCategoryByLine] = useState<Record<number, number | null>>({});
   const [subcategoryByLine, setSubcategoryByLine] = useState<Record<number, number | null>>({});
   const [recurringByLine, setRecurringByLine] = useState<Record<number, boolean>>({});
+  const [sharedByLine, setSharedByLine] = useState<Record<number, boolean>>({});
+  const [sharedTouchedByLine, setSharedTouchedByLine] = useState<Record<number, boolean>>({});
   const [notesByLine, setNotesByLine] = useState<Record<number, string>>({});
+  const [descriptionByLine, setDescriptionByLine] = useState<Record<number, string>>({});
   const [reimbursementByLine, setReimbursementByLine] = useState<Record<number, boolean>>({});
   const [paidByByHolder, setPaidByByHolder] = useState<Record<string, string>>({});
   const [copiedHolder, setCopiedHolder] = useState<string | null>(null);
   const [statementPeriod, setStatementPeriod] = useState("");
-  const [paidByUserId, setPaidByUserId] = useState(String(users[0]?.id ?? 1));
+  const [paidByUserId, setPaidByUserId] = useState(String(currentUser.id));
   const queryClient = useQueryClient();
   const pendingImports = useQuery({ queryKey: ["imports", homeId, "parsed"], queryFn: () => api.imports(homeId, "parsed") });
   const loadBatch = (data: ImportBatch) => {
+    const savedDescriptions = data.source_type === "bbva_account_xls" ? storedImportDescriptions(homeId, data.id) : {};
+    const holderPayers = Object.fromEntries(Array.from(new Set(data.lines.map(cardholderKey))).map((holder) => [holder, userIdForCardholder(holder, users, String(currentUser.id))]));
     setBatch(data);
+    setPaidByUserId(String(currentUser.id));
     setSelected(data.lines.filter((line) => line.status === "pending" && line.duplicate_status !== "already_committed" && !isIgnoredImportLine(line)).map((line) => line.id));
     setCategoryByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_category_id])));
     setSubcategoryByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_subcategory_id])));
     setRecurringByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_recurring])));
+    setSharedByLine(Object.fromEntries(data.lines.map((line) => {
+      const payerId = Number(holderPayers[cardholderKey(line)] ?? currentUser.id);
+      const payerIsMauro = users.find((user) => user.id === payerId)?.display_name.toUpperCase().includes("MAURO") ?? false;
+      return [line.id, line.suggested_shared || (data.card_network === "mastercard" && payerIsMauro)];
+    })));
+    setSharedTouchedByLine({});
     setNotesByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.notes ?? ""])));
+    setDescriptionByLine(Object.fromEntries(data.lines.map((line) => [line.id, savedDescriptions[String(line.id)] ?? line.description])));
     setReimbursementByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.kind === "reimbursement"])));
-    setPaidByByHolder(Object.fromEntries(Array.from(new Set(data.lines.map(cardholderKey))).map((holder) => [holder, userIdForCardholder(holder, users, String(users[0]?.id ?? 1))])));
+    setPaidByByHolder(holderPayers);
     setStatementPeriod(data.statement_period ?? "");
     setCopiedHolder(null);
   };
+  useEffect(() => {
+    if (!batch || batch.source_type !== "bbva_account_xls") return;
+    const overrides = Object.fromEntries(
+      batch.lines
+        .filter((line) => (descriptionByLine[line.id] ?? line.description) !== line.description)
+        .map((line) => [line.id, descriptionByLine[line.id]])
+    );
+    const storageKey = importDescriptionStorageKey(homeId, batch.id);
+    if (Object.keys(overrides).length) window.localStorage.setItem(storageKey, JSON.stringify(overrides));
+    else window.localStorage.removeItem(storageKey);
+  }, [batch, descriptionByLine, homeId]);
   const updateBatch = useMutation({
     mutationFn: ({ batchId, nextStatementPeriod }: { batchId: number; nextStatementPeriod: string }) =>
       api.updateImportBatch(homeId, batchId, { statement_period: nextStatementPeriod || null }),
@@ -2150,17 +2355,25 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
       const rejected = (batch?.lines ?? [])
         .filter((line) => line.status === "pending" && !selected.includes(line.id) && !isIgnoredImportLine(line))
         .map((line) => line.id);
-      const paidByOverrides = Object.fromEntries(
-        (batch?.lines ?? [])
-          .filter((line) => selected.includes(line.id))
-          .map((line) => [line.id, Number(paidByByHolder[cardholderKey(line)] ?? paidByUserId)])
-      );
+      const paidByOverrides = batch?.source_type === "bbva_account_xls"
+        ? {}
+        : Object.fromEntries(
+            (batch?.lines ?? [])
+              .filter((line) => selected.includes(line.id))
+              .map((line) => [line.id, Number(paidByByHolder[cardholderKey(line)] ?? paidByUserId)])
+          );
       if (batch!.source_type !== "bbva_account_xls" && statementPeriod !== (batch!.statement_period ?? "")) {
         await api.updateImportBatch(homeId, batch!.id, { statement_period: statementPeriod || null });
       }
-      return api.commitImport(homeId, batch!.id, selected, Number(paidByUserId), categoryByLine, subcategoryByLine, recurringByLine, notesByLine, reimbursementByLine, paidByOverrides, rejected);
+      const descriptionOverrides = Object.fromEntries(
+        batch!.lines
+          .filter((line) => selected.includes(line.id) && batch!.source_type === "bbva_account_xls")
+          .map((line) => [line.id, (descriptionByLine[line.id] ?? line.description).trim()])
+      );
+      return api.commitImport(homeId, batch!.id, selected, Number(paidByUserId), categoryByLine, subcategoryByLine, recurringByLine, sharedByLine, notesByLine, descriptionOverrides, reimbursementByLine, paidByOverrides, rejected);
     },
     onSuccess: () => {
+      if (batch) clearStoredImportDescriptions(homeId, batch.id);
       queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
       queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
       setBatch(null);
@@ -2168,7 +2381,10 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
       setCategoryByLine({});
       setSubcategoryByLine({});
       setRecurringByLine({});
+      setSharedByLine({});
+      setSharedTouchedByLine({});
       setNotesByLine({});
+      setDescriptionByLine({});
       setReimbursementByLine({});
       setPaidByByHolder({});
       setStatementPeriod("");
@@ -2181,13 +2397,17 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
   const deleteImport = useMutation({
     mutationFn: (batchId: number) => api.deleteImport(homeId, batchId),
     onSuccess: (_, batchId) => {
+      clearStoredImportDescriptions(homeId, batchId);
       if (batch?.id === batchId) {
         setBatch(null);
         setSelected([]);
         setCategoryByLine({});
         setSubcategoryByLine({});
         setRecurringByLine({});
+        setSharedByLine({});
+        setSharedTouchedByLine({});
         setNotesByLine({});
+        setDescriptionByLine({});
         setReimbursementByLine({});
         setPaidByByHolder({});
         setStatementPeriod("");
@@ -2198,6 +2418,9 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
   });
   const totals = importTotals(batch?.lines ?? [], selected, batch?.source_type, reimbursementByLine);
   const reviewCount = (batch?.lines ?? []).filter((line) => selected.includes(line.id) && !categoryByLine[line.id] && !isIgnoredImportLine(line)).length;
+  const invalidDescriptionCount = (batch?.lines ?? []).filter(
+    (line) => selected.includes(line.id) && batch?.source_type === "bbva_account_xls" && !(descriptionByLine[line.id] ?? line.description).trim()
+  ).length;
   const reviewLines = useMemo(() => orderedImportLines(batch?.lines ?? [], batch?.source_type), [batch]);
   const duplicateCounts = batch?.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.duplicate_status] = (acc[line.duplicate_status] ?? 0) + 1;
@@ -2248,6 +2471,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
           />
         </label>
       </div>
+      <MercadoPagoImportSync currentUser={currentUser} homeId={homeId} />
       </div>
       {!!pendingImports.data?.length && (
         <div className="panel">
@@ -2302,6 +2526,8 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                 <AlertTriangle size={16} />
                 Consumos a revisar: <strong>{reviewCount}</strong>
               </div>
+              {batch.source_type === "bbva_account_xls" && <small className="muted">Las descripciones editadas se guardan en este navegador hasta procesar la carga.</small>}
+              {!!invalidDescriptionCount && <small className="form-error">Completá la descripción de {invalidDescriptionCount} movimiento(s) seleccionado(s).</small>}
             </div>
             <div className="toolbar compact">
               {batch.source_type !== "bbva_account_xls" && (
@@ -2323,13 +2549,13 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
               <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagador del resumen">
                 {users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
               </select>
-              <button className="primary" disabled={!selected.length || commit.isPending || updateBatch.isPending} onClick={() => commit.mutate()}>
+              <button className="primary" disabled={!selected.length || !!invalidDescriptionCount || commit.isPending || updateBatch.isPending} onClick={() => commit.mutate()}>
                 Procesar {selected.length} lineas
               </button>
             </div>
           </div>
           <table>
-            <thead><tr><th></th><th>Fecha</th><th>Descripcion</th><th>Tipo</th><th>Reintegro</th><th>Categoria</th><th>Subcategoria</th><th>Recurrente</th><th>Nota</th><th>Importe</th><th>Estado</th></tr></thead>
+            <thead><tr><th></th><th>Fecha</th><th>Descripcion</th><th>Tipo</th><th>Reintegro</th><th>Categoria</th><th>Subcategoria</th><th>Recurrente</th><th>Compartido</th><th>Nota</th><th>Importe</th><th>Estado</th></tr></thead>
             <tbody>
               {reviewLines.map((line, index) => {
                 const selectedCategory = categories.find((category) => category.id === categoryByLine[line.id]);
@@ -2348,7 +2574,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                   <Fragment key={line.id}>
                     {showHolderSeparator && (
                       <tr className="person-separator">
-                        <td colSpan={11}>
+                        <td colSpan={12}>
                           <div className="person-separator-content">
                             <div>
                               <strong>{cardholderLabel(line)}</strong>
@@ -2361,7 +2587,17 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                               <select
                                 className="person-action-control"
                                 value={paidByByHolder[holderKey] ?? paidByUserId}
-                                onChange={(event) => setPaidByByHolder((current) => ({ ...current, [holderKey]: event.target.value }))}
+                                onChange={(event) => {
+                                  const nextPayerId = Number(event.target.value);
+                                  const payerIsMauro = users.find((user) => user.id === nextPayerId)?.display_name.toUpperCase().includes("MAURO") ?? false;
+                                  setPaidByByHolder((current) => ({ ...current, [holderKey]: event.target.value }));
+                                  if (batch.card_network === "mastercard") {
+                                    setSharedByLine((current) => ({
+                                      ...current,
+                                      ...Object.fromEntries(holderLines.filter((item) => !sharedTouchedByLine[item.id]).map((item) => [item.id, payerIsMauro || item.suggested_shared]))
+                                    }));
+                                  }
+                                }}
                                 aria-label={`Pagador ${cardholderLabel(line)}`}
                               >
                                 {users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
@@ -2403,7 +2639,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                     )}
                     {showMonthSeparator && (
                       <tr className="month-separator">
-                        <td colSpan={11}>
+                        <td colSpan={12}>
                           <strong>{monthLabel(importLinePeriod(line))}</strong>
                           <ImportMonthTotals lines={batch.lines} selected={selected} period={importLinePeriod(line)} reimbursementByLine={reimbursementByLine} />
                         </td>
@@ -2411,7 +2647,7 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                     )}
                     {showCurrencySeparator && (
                       <tr className={`currency-separator ${line.currency.toLowerCase()}`}>
-                        <td colSpan={11}>Consumos en {line.currency}</td>
+                        <td colSpan={12}>Consumos en {line.currency}</td>
                       </tr>
                     )}
                     <tr
@@ -2433,7 +2669,18 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                         />
                       </td>
                       <td>{line.date}</td>
-                      <td>{line.description}</td>
+                      <td>
+                        {batch.source_type === "bbva_account_xls" ? (
+                          <input
+                            className="table-input import-description-input"
+                            value={descriptionByLine[line.id] ?? line.description}
+                            maxLength={240}
+                            disabled={isLineDisabled}
+                            onChange={(event) => setDescriptionByLine((current) => ({ ...current, [line.id]: event.target.value }))}
+                            aria-label={`Descripcion ${line.description}`}
+                          />
+                        ) : line.description}
+                      </td>
                       <td>{kindLabel(line.kind)}</td>
                       <td>
                         {batch.source_type === "bbva_account_xls" && line.kind === "income" ? (
@@ -2466,6 +2713,12 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                             if (nextCategory?.name === "Suscripciones" || nextCategory?.name === "Servicios") {
                               setRecurringByLine((current) => ({ ...current, [line.id]: true }));
                             }
+                            if (!sharedTouchedByLine[line.id]) {
+                              setSharedByLine((current) => ({
+                                ...current,
+                                [line.id]: initialSharedSuggestion(line.description, nextCategory?.name)
+                              }));
+                            }
                           }}
                           aria-label={`Categoria ${line.description}`}
                         >
@@ -2496,6 +2749,18 @@ function Imports({ categories, users, homeId }: { categories: Category[]; users:
                           disabled={isLineDisabled}
                           onChange={(event) => setRecurringByLine((current) => ({ ...current, [line.id]: event.target.checked }))}
                           aria-label={`Recurrente ${line.description}`}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={!!sharedByLine[line.id]}
+                          disabled={isLineDisabled}
+                          onChange={(event) => {
+                            setSharedByLine((current) => ({ ...current, [line.id]: event.target.checked }));
+                            setSharedTouchedByLine((current) => ({ ...current, [line.id]: true }));
+                          }}
+                          aria-label={`Compartido ${line.description}`}
                         />
                       </td>
                       <td>
@@ -3370,7 +3635,7 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
 }
 
 function sourceLabel(source: ExpenseSource) {
-  return { manual: "Manual", import_pdf: "Credito", bank_import: "Cuenta", mercadopago: "Mercado Pago", cash: "Efectivo", transfer: "Transferencia", other: "Otro" }[source];
+  return { manual: "Manual", import_pdf: "Credito", bank_import: "Cuenta", mercadopago: "Debito MercadoPago", cash: "Efectivo", transfer: "Transferencia", other: "Otro" }[source];
 }
 
 function mercadoPagoStatus(integration?: MercadoPagoIntegration) {

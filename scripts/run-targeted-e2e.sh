@@ -4,6 +4,8 @@ set -euo pipefail
 cd /workspace
 export SPENT_DATABASE_URL="sqlite:////tmp/spent-analyzer-e2e-target.db"
 export SPENT_TEST_AUTH_ENABLED="true"
+export VITE_TEST_USER_EMAIL="mauro@example.test"
+export VITE_ENABLE_API_FALLBACKS="true"
 rm -f /tmp/spent-analyzer-e2e-target.db
 
 uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 >/tmp/spent-api.log 2>&1 &
@@ -22,4 +24,4 @@ do
 done
 
 cd /workspace/frontend
-npx playwright test app.spec.ts -g "deselected import lines" --project=chromium-desktop
+npx playwright test app.spec.ts -g "${E2E_GREP:-deselected import lines}" --project=chromium-desktop

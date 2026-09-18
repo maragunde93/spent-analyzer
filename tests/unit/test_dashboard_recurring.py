@@ -264,6 +264,17 @@ class DashboardRecurringTests(unittest.TestCase):
         )
         self.assertNotIn("Suscripciones", [category["name"] for category in may["categories"]])
 
+    def test_dashboard_filters_shared_scope_independently_from_payer(self):
+        self._expense(date(2026, 8, 1), "Edesur", self.services.id, None, Decimal("70000.00"), False, is_shared=True)
+        self._expense(date(2026, 8, 2), "ChatGPT", self.subscriptions.id, None, Decimal("20000.00"), False, is_shared=False)
+        self.db.commit()
+
+        shared = dashboard(self.home.id, is_shared=True, user=self.user, db=self.db)
+        personal = dashboard(self.home.id, is_shared=False, user=self.user, db=self.db)
+
+        self.assertEqual(shared.total_ars, Decimal("70000.00"))
+        self.assertEqual(personal.total_ars, Decimal("20000.00"))
+
     def _expense(
         self,
         expense_date: date,
@@ -275,6 +286,7 @@ class DashboardRecurringTests(unittest.TestCase):
         source: ExpenseSource = ExpenseSource.bank_import,
         import_line_id: int | None = None,
         paid_by_user_id: int | None = None,
+        is_shared: bool = False,
     ) -> Expense:
         expense = Expense(
             home_group_id=self.home.id,
@@ -290,6 +302,7 @@ class DashboardRecurringTests(unittest.TestCase):
             amount_ars=amount,
             import_line_id=import_line_id,
             is_recurring=is_recurring,
+            is_shared=is_shared,
         )
         self.db.add(expense)
         return expense

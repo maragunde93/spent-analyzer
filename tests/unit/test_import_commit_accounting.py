@@ -66,6 +66,33 @@ class ImportCommitAccountingTests(unittest.TestCase):
         self.assertEqual(expense.amount_ars, Decimal("36539.00"))
         self.assertEqual(expense.notes, "Factura de luz compartida")
 
+    def test_bank_import_uses_edited_description_and_persists_it_on_the_import_line(self):
+        batch = self._batch("bbva_account_xls")
+        line = self._line(
+            batch,
+            "PAGO DE SERVICIOS TARJETA 18073039 OP5056",
+            ImportLineKind.debit_purchase,
+            Decimal("-36539.00"),
+            suggested_category_id=self.services.id,
+        )
+        self.db.commit()
+
+        commit_import(
+            self.home.id,
+            batch.id,
+            ImportCommitRequest(
+                line_ids=[line.id],
+                paid_by_user_id=self.user.id,
+                description_overrides={line.id: "Edesur agosto"},
+            ),
+            self.user,
+            self.db,
+        )
+
+        expense = self.db.scalar(select(Expense).where(Expense.import_line_id == line.id))
+        self.assertEqual(expense.description, "Edesur agosto")
+        self.assertEqual(self.db.get(ImportLine, line.id).description, "Edesur agosto")
+
     def test_bank_titulos_line_is_ignored_instead_of_becoming_service_consumption(self):
         batch = self._batch("bbva_account_xls")
         line = self._line(
@@ -223,6 +250,47 @@ class ImportCommitAccountingTests(unittest.TestCase):
         self.assertEqual(expense.amount_ars, Decimal("15000.00"))
         self.assertEqual(_read_batch(self.db, batch.id).fx_rate_ars_per_usd, Decimal("1500.0000"))
 
+    def test_mauro_mastercard_defaults_to_shared(self):
+        batch = self._batch("bbva_visa_pdf")
+        batch.card_network = "mastercard"
+        line = self._line(batch, "COMPRA PERSONALIZADA", ImportLineKind.purchase, Decimal("1000.00"))
+        line.cardholder_name = "Mauro"
+        self.db.commit()
+
+        self.assertTrue(_read_batch(self.db, batch.id).lines[0].suggested_shared)
+
+        commit_import(
+            self.home.id,
+            batch.id,
+            ImportCommitRequest(line_ids=[line.id], paid_by_user_id=self.user.id),
+            self.user,
+            self.db,
+        )
+
+        expense = self.db.scalar(select(Expense).where(Expense.import_line_id == line.id))
+        self.assertTrue(expense.is_shared)
+
+    def test_shared_override_can_keep_mastercard_expense_personal(self):
+        batch = self._batch("bbva_visa_pdf")
+        batch.card_network = "mastercard"
+        line = self._line(batch, "OPENAI CHATGPT", ImportLineKind.purchase, Decimal("20.00"), suggested_shared=False)
+        self.db.commit()
+
+        commit_import(
+            self.home.id,
+            batch.id,
+            ImportCommitRequest(
+                line_ids=[line.id],
+                paid_by_user_id=self.user.id,
+                shared_overrides={line.id: False},
+            ),
+            self.user,
+            self.db,
+        )
+
+        expense = self.db.scalar(select(Expense).where(Expense.import_line_id == line.id))
+        self.assertFalse(expense.is_shared)
+
     def _batch(self, source_type: str) -> ImportBatch:
         batch = ImportBatch(
             home_group_id=self.home.id,
@@ -243,6 +311,7 @@ class ImportCommitAccountingTests(unittest.TestCase):
         currency: Currency = Currency.ARS,
         suggested_category_id: int | None = None,
         suggested_recurring: bool = False,
+        suggested_shared: bool = False,
     ) -> ImportLine:
         line = ImportLine(
             import_batch_id=batch.id,
@@ -254,6 +323,7 @@ class ImportCommitAccountingTests(unittest.TestCase):
             original_amount=amount,
             suggested_category_id=suggested_category_id,
             suggested_recurring=suggested_recurring,
+            suggested_shared=suggested_shared,
             fingerprint=f"{batch.id}:{description}:{amount}",
             raw_text=description,
         )

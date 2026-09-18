@@ -117,6 +117,13 @@ class BbvaParserTests(unittest.TestCase):
         self.assertEqual(by_description["SUPERMERCADO"].cardholder_name, "Mauro")
         self.assertEqual(by_description["FARMACIA"].cardholder_name, "Micaela Carolina")
 
+    def test_card_network_is_detected_for_mastercard_statements(self):
+        text = (ROOT / "tests" / "fixtures" / "bbva_visa_sanitized.txt").read_text(encoding="utf-8").replace("Visa Signature", "Mastercard Black")
+
+        parsed = parse_bbva_visa_text(text)
+
+        self.assertEqual(parsed.card_network, "mastercard")
+
 
 if __name__ == "__main__":
     unittest.main()

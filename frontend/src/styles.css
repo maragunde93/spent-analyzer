@@ -522,7 +522,7 @@ nav, .soon, .stack { display: flex; flex-direction: column; gap: 10px; }
   min-height: auto;
 }
 .dashboard-filters.wide .filter-summary-row {
-  grid-template-columns: minmax(160px, 240px);
+  grid-template-columns: repeat(2, minmax(160px, 240px));
 }
 .dashboard-filters.wide .filter-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -857,13 +857,14 @@ th, td { padding: 12px 10px; border-bottom: 1px solid #1e293b; text-align: left;
 th { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .expense-table {
   table-layout: fixed;
-  min-width: 1240px;
+  min-width: 1370px;
 }
 .expense-date-col { width: 104px; }
 .expense-description-col { width: 220px; }
 .expense-paid-col { width: 112px; }
 .expense-category-col { width: 190px; }
 .expense-source-col { width: 116px; }
+.expense-shared-col { width: 130px; }
 .expense-recurring-col { width: 96px; }
 .expense-amount-col { width: 142px; }
 .expense-note-col { width: 250px; }
@@ -895,6 +896,11 @@ th { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing:
   width: 250px;
   white-space: normal;
 }
+.expense-table .note-value {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .expense-table .actions-cell {
   width: 110px;
 }
@@ -919,6 +925,9 @@ td select { min-height: 34px; max-width: 180px; }
 .table-input {
   min-height: 34px;
   width: 180px;
+}
+.import-description-input {
+  width: 260px;
 }
 .inline-edit-fields {
   display: inline-flex;
@@ -1051,6 +1060,11 @@ button.person-action-control:disabled {
   background: #311116;
   color: #fecaca;
 }
+.shared-chip {
+  border-color: #0f766e;
+  background: #0b2f2d;
+  color: #99f6e4;
+}
 .needs-review-row td {
   background: rgba(239, 68, 68, .06);
 }
@@ -1097,10 +1111,11 @@ button.person-action-control:disabled {
 }
 .import-choice-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 16px;
 }
 .import-drop p { margin: 4px 0 0; color: #94a3b8; }
+.mp-import-card small { display: block; margin-top: 8px; }
 .import-totals {
   display: flex;
   flex-wrap: wrap;
@@ -1283,12 +1298,6 @@ button.person-action-control:disabled {
   width: 100%;
   min-height: 60px;
   resize: vertical;
-}
-.note-row td {
-  background: #101827;
-  color: #cbd5e1;
-  white-space: normal;
-  line-height: 1.5;
 }
 .delta-table-wrap {
   overflow: auto;

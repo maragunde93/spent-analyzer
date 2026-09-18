@@ -39,7 +39,8 @@ export const demoExpenses: Expense[] = [
     source: "import_pdf",
     currency: "ARS",
     original_amount: "39380.00",
-    amount_ars: "39380.00"
+    amount_ars: "39380.00",
+    is_shared: false
   },
   {
     id: 2,
@@ -51,7 +52,8 @@ export const demoExpenses: Expense[] = [
     source: "import_pdf",
     currency: "ARS",
     original_amount: "163472.90",
-    amount_ars: "163472.90"
+    amount_ars: "163472.90",
+    is_shared: true
   },
   {
     id: 3,
@@ -64,7 +66,8 @@ export const demoExpenses: Expense[] = [
     currency: "USD",
     original_amount: "20.00",
     amount_ars: "20000.00",
-    is_recurring: true
+    is_recurring: true,
+    is_shared: false
   },
   {
     id: 4,
@@ -76,7 +79,8 @@ export const demoExpenses: Expense[] = [
     source: "manual",
     currency: "ARS",
     original_amount: "62240.50",
-    amount_ars: "62240.50"
+    amount_ars: "62240.50",
+    is_shared: true
   },
   {
     id: 5,
@@ -88,7 +92,8 @@ export const demoExpenses: Expense[] = [
     source: "manual",
     currency: "ARS",
     original_amount: "7400.00",
-    amount_ars: "7400.00"
+    amount_ars: "7400.00",
+    is_shared: false
   }
 ];
 
@@ -163,6 +168,7 @@ export const demoImport: ImportBatch = {
   statement_account: "0000000000",
   period_label: "28-May-26",
   statement_period: "2026-05",
+  card_network: "visa",
   fx_rate_ars_per_usd: "1500.0000",
   status: "parsed",
   created_at: "2026-07-03T12:00:00",
@@ -180,6 +186,7 @@ export const demoImport: ImportBatch = {
       suggested_category_id: 4,
       suggested_subcategory_id: null,
       suggested_recurring: true,
+      suggested_shared: false,
       status: "pending",
       duplicate_status: "new"
     },
@@ -195,6 +202,7 @@ export const demoImport: ImportBatch = {
       suggested_category_id: null,
       suggested_subcategory_id: null,
       suggested_recurring: false,
+      suggested_shared: false,
       status: "pending",
       duplicate_status: "new"
     }
