@@ -1,5 +1,6 @@
 export type Currency = "ARS" | "USD";
 export type ExpenseSource = "manual" | "import_pdf" | "bank_import" | "mercadopago" | "cash" | "transfer" | "other";
+export type SharedScope = "all" | "shared" | "personal";
 
 export type Category = {
   id: number;
@@ -68,6 +69,7 @@ export type Expense = {
   amount_ars: string;
   notes?: string | null;
   is_recurring?: boolean;
+  is_shared: boolean;
 };
 
 export type DashboardSummary = {
@@ -136,6 +138,7 @@ export type ImportLine = {
   suggested_category_id: number | null;
   suggested_subcategory_id: number | null;
   suggested_recurring: boolean;
+  suggested_shared: boolean;
   notes?: string | null;
   status: string;
   duplicate_status: "new" | "previously_parsed" | "already_committed";
@@ -149,6 +152,7 @@ export type ImportBatch = {
   statement_account: string | null;
   period_label: string | null;
   statement_period: string | null;
+  card_network: string | null;
   fx_rate_ars_per_usd: string | null;
   status: string;
   created_at: string | null;

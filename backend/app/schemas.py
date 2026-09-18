@@ -130,6 +130,7 @@ class ExpenseCreate(BaseModel):
     source: ExpenseSource = ExpenseSource.manual
     notes: str | None = Field(default=None, max_length=500)
     is_recurring: bool = False
+    is_shared: bool = False
 
     @field_validator("description")
     @classmethod
@@ -152,6 +153,7 @@ class ExpenseUpdate(BaseModel):
     source: ExpenseSource | None = None
     notes: str | None = Field(default=None, max_length=500)
     is_recurring: bool | None = None
+    is_shared: bool | None = None
 
     @field_validator("description")
     @classmethod
@@ -207,6 +209,7 @@ class ImportLineRead(BaseModel):
     suggested_category_id: int | None
     suggested_subcategory_id: int | None
     suggested_recurring: bool = False
+    suggested_shared: bool = False
     notes: str | None = Field(default=None, max_length=500)
     status: str
     duplicate_status: str = "new"
@@ -222,6 +225,7 @@ class ImportBatchRead(BaseModel):
     statement_account: str | None
     period_label: str | None
     statement_period: str | None = None
+    card_network: str | None = None
     fx_rate_ars_per_usd: Decimal | None = None
     status: str
     created_at: str | None = None
@@ -241,8 +245,23 @@ class ImportCommitRequest(BaseModel):
     category_overrides: dict[int, int | None] = {}
     subcategory_overrides: dict[int, int | None] = {}
     recurring_overrides: dict[int, bool] = {}
+    shared_overrides: dict[int, bool] = {}
     note_overrides: dict[int, str | None] = {}
+    description_overrides: dict[int, str] = {}
     reimbursement_overrides: dict[int, bool] = {}
+
+    @field_validator("description_overrides")
+    @classmethod
+    def validate_description_overrides(cls, value: dict[int, str]) -> dict[int, str]:
+        cleaned: dict[int, str] = {}
+        for line_id, description in value.items():
+            normalized = description.strip()
+            if not normalized:
+                raise ValueError("La descripcion no puede estar vacia")
+            if len(normalized) > 240:
+                raise ValueError("La descripcion no puede superar 240 caracteres")
+            cleaned[line_id] = normalized
+        return cleaned
 
 
 class CashWalletEntryCreate(BaseModel):

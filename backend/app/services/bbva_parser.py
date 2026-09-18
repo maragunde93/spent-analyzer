@@ -49,6 +49,7 @@ class ParsedStatementLine:
 class ParsedStatement:
     account: str | None
     period_label: str | None
+    card_network: str | None
     lines: list[ParsedStatementLine]
 
 
@@ -75,6 +76,7 @@ def parse_bbva_visa_pdf(path: str | Path) -> ParsedStatement:
 def parse_bbva_visa_text(text: str) -> ParsedStatement:
     account = _first_match(text, r"cuenta\s+(\d+)")
     period_label = _first_match(text, r"CIERRE ACTUAL VENCIMIENTO ACTUAL.*?\n([0-9]{2}-[A-Za-z]{3}-[0-9]{2})")
+    card_network = _detect_card_network(text)
     statement_date = parse_spanish_date(period_label) if period_label else None
     lines: list[ParsedStatementLine] = []
     section = "ignore"
@@ -126,7 +128,16 @@ def parse_bbva_visa_text(text: str) -> ParsedStatement:
         if parsed:
             lines.append(parsed)
 
-    return ParsedStatement(account=account, period_label=period_label, lines=lines)
+    return ParsedStatement(account=account, period_label=period_label, card_network=card_network, lines=lines)
+
+
+def _detect_card_network(text: str) -> str | None:
+    header = text[:3000].upper()
+    if "MASTERCARD" in header or "MASTER CARD" in header:
+        return "mastercard"
+    if "VISA" in header:
+        return "visa"
+    return None
 
 
 def _first_match(text: str, pattern: str) -> str | None:

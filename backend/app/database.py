@@ -41,17 +41,25 @@ def ensure_incremental_schema() -> None:
                 connection.execute(text("ALTER TABLE expenses ADD COLUMN notes TEXT"))
             if "is_recurring" not in expense_columns:
                 connection.execute(text("ALTER TABLE expenses ADD COLUMN is_recurring BOOLEAN NOT NULL DEFAULT 0"))
+            if "is_shared" not in expense_columns:
+                # Existing expenses are intentionally personal. Only new expenses
+                # receive shared-scope suggestions after this migration.
+                connection.execute(text("ALTER TABLE expenses ADD COLUMN is_shared BOOLEAN NOT NULL DEFAULT 0"))
             _ensure_sqlite_mercadopago_schema(connection)
             import_batch_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(import_batches)"))}
             if "fx_rate_ars_per_usd" not in import_batch_columns:
                 connection.execute(text("ALTER TABLE import_batches ADD COLUMN fx_rate_ars_per_usd NUMERIC(14, 4)"))
             if "statement_period" not in import_batch_columns:
                 connection.execute(text("ALTER TABLE import_batches ADD COLUMN statement_period VARCHAR(7)"))
+            if "card_network" not in import_batch_columns:
+                connection.execute(text("ALTER TABLE import_batches ADD COLUMN card_network VARCHAR(40)"))
             import_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(import_lines)"))}
             if "suggested_subcategory_id" not in import_columns:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
             if "suggested_recurring" not in import_columns:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN suggested_recurring BOOLEAN NOT NULL DEFAULT 0"))
+            if "suggested_shared" not in import_columns:
+                connection.execute(text("ALTER TABLE import_lines ADD COLUMN suggested_shared BOOLEAN NOT NULL DEFAULT 0"))
             if "notes" not in import_columns:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN notes TEXT"))
             if "cardholder_name" not in import_columns:
@@ -77,6 +85,15 @@ def ensure_incremental_schema() -> None:
                 connection.execute(text("ALTER TABLE merchants ADD COLUMN subcategory_id INTEGER REFERENCES subcategories(id)"))
             if "is_recurring" not in merchant_columns:
                 connection.execute(text("ALTER TABLE merchants ADD COLUMN is_recurring BOOLEAN NOT NULL DEFAULT 0"))
+            if "has_shared_override" not in merchant_columns:
+                connection.execute(text("ALTER TABLE merchants ADD COLUMN has_shared_override BOOLEAN NOT NULL DEFAULT 0"))
+            if "is_shared" not in merchant_columns:
+                connection.execute(text("ALTER TABLE merchants ADD COLUMN is_shared BOOLEAN NOT NULL DEFAULT 0"))
+            mp_rule_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(mercadopago_merchant_rules)"))}
+            if "has_shared_override" not in mp_rule_columns:
+                connection.execute(text("ALTER TABLE mercadopago_merchant_rules ADD COLUMN has_shared_override BOOLEAN NOT NULL DEFAULT 0"))
+            if "is_shared" not in mp_rule_columns:
+                connection.execute(text("ALTER TABLE mercadopago_merchant_rules ADD COLUMN is_shared BOOLEAN NOT NULL DEFAULT 0"))
             _backfill_import_batch_fx_rates(connection)
             _repair_bank_import_signs(connection)
     elif engine.dialect.name == "postgresql":
@@ -84,6 +101,7 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS notes TEXT"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(
                 text(
                     """
@@ -111,8 +129,10 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_mercadopago_integrations_user_id ON mercadopago_integrations(user_id)"))
             connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS fx_rate_ars_per_usd NUMERIC(14, 4)"))
             connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS statement_period VARCHAR(7)"))
+            connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS card_network VARCHAR(40)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_shared BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS notes TEXT"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS cardholder_name VARCHAR(160)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS mercadopago_merchant_key VARCHAR(120)"))
@@ -125,6 +145,10 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("ALTER TABLE receipt_items ADD COLUMN IF NOT EXISTS suggested_subcategory_name VARCHAR(80)"))
             connection.execute(text("ALTER TABLE merchants ADD COLUMN IF NOT EXISTS subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE merchants ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(text("ALTER TABLE merchants ADD COLUMN IF NOT EXISTS has_shared_override BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(text("ALTER TABLE merchants ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(text("ALTER TABLE mercadopago_merchant_rules ADD COLUMN IF NOT EXISTS has_shared_override BOOLEAN NOT NULL DEFAULT FALSE"))
+            connection.execute(text("ALTER TABLE mercadopago_merchant_rules ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT FALSE"))
             _backfill_import_batch_fx_rates(connection)
             _repair_bank_import_signs(connection)
 
@@ -201,6 +225,8 @@ def _ensure_sqlite_mercadopago_schema(connection) -> None:
                 category_id INTEGER REFERENCES categories(id),
                 subcategory_id INTEGER REFERENCES subcategories(id),
                 is_recurring BOOLEAN NOT NULL DEFAULT 0,
+                has_shared_override BOOLEAN NOT NULL DEFAULT 0,
+                is_shared BOOLEAN NOT NULL DEFAULT 0,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 CONSTRAINT uq_mp_merchant_rule_home_key UNIQUE (home_group_id, merchant_key)
@@ -236,6 +262,8 @@ def _ensure_postgres_mercadopago_runtime_schema(connection) -> None:
                 category_id INTEGER REFERENCES categories(id),
                 subcategory_id INTEGER REFERENCES subcategories(id),
                 is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
+                has_shared_override BOOLEAN NOT NULL DEFAULT FALSE,
+                is_shared BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 CONSTRAINT uq_mp_merchant_rule_home_key UNIQUE (home_group_id, merchant_key)

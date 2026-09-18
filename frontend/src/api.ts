@@ -90,10 +90,11 @@ export const api = {
       `/households/${homeId}/mercadopago/integrations/${userId}`,
       { method: "DELETE" }
     ),
-  dashboard: (homeId: number, paidByUserId?: string, categoryIds: number[] = []) => {
+  dashboard: (homeId: number, paidByUserId?: string, categoryIds: number[] = [], sharedScope: "all" | "shared" | "personal" = "all") => {
     const search = new URLSearchParams();
     if (paidByUserId && paidByUserId !== "all") search.set("paid_by_user_id", paidByUserId);
     for (const categoryId of categoryIds) search.append("category_ids", String(categoryId));
+    if (sharedScope !== "all") search.set("is_shared", String(sharedScope === "shared"));
     const params = search.toString() ? `?${search.toString()}` : "";
     return request<DashboardSummary>(`/households/${homeId}/dashboard${params}`, undefined, demoDashboard);
   },
@@ -222,7 +223,9 @@ export const api = {
     categoryOverrides: Record<number, number | null>,
     subcategoryOverrides: Record<number, number | null>,
     recurringOverrides: Record<number, boolean> = {},
+    sharedOverrides: Record<number, boolean> = {},
     noteOverrides: Record<number, string | null> = {},
+    descriptionOverrides: Record<number, string> = {},
     reimbursementOverrides: Record<number, boolean> = {},
     paidByOverrides: Record<number, number> = {},
     rejectedLineIds: number[] = []
@@ -240,7 +243,9 @@ export const api = {
           category_overrides: categoryOverrides,
           subcategory_overrides: subcategoryOverrides,
           recurring_overrides: recurringOverrides,
+          shared_overrides: sharedOverrides,
           note_overrides: noteOverrides,
+          description_overrides: descriptionOverrides,
           reimbursement_overrides: reimbursementOverrides
         })
       },

@@ -1,6 +1,6 @@
 # Codex Context - Spent Analyzer
 
-Last updated: 2026-09-17
+Last updated: 2026-09-18
 
 Use this file as the compact handoff context for future Codex threads. Start new work by reading this file, then inspect only the files relevant to the requested task. Update this file when a feature or fix changes durable product behavior, data contracts, workflow rules, testing expectations, or operational knowledge that future Codex threads should inherit.
 
@@ -397,8 +397,18 @@ Important fields:
 - `uploaded_by_user_id`: user who uploaded/created the data
 - `source`: `manual`, `import_pdf` (shown as "Credito" in UI), `bank_import`, `mercadopago`, `cash`, `transfer`, `other`
 - optional `category_id`, `subcategory_id`, `notes`, `is_recurring`
+- `is_shared`: household-shared vs personal scope; this is independent from `paid_by_user_id`
 
 No equal split logic exists. Reports can filter by payer/uploader/category/date, but paid totals remain per payer.
+
+Shared-scope behavior:
+- Historical expenses are migrated as personal (`is_shared = false`).
+- New expenses can be marked shared/personal during manual creation, editing, and import review.
+- New services default to shared, except personal-service descriptions such as ChatGPT/OpenAI and mobile telephony.
+- Supermarkets, butcher shops, greengrocers, and similar household shopping default to shared.
+- All future expenses paid by Mauro from a detected Mastercard statement default to shared; the review checkbox can explicitly override this.
+- Merchant learning persists the chosen shared/personal scope for future matching imports. Existing merchant rows do not become learned personal overrides merely because historical expenses were migrated as personal.
+- Shared/personal filters are available independently from payer filters in Dashboard and Expenses.
 
 ### Card PDF Imports
 
@@ -489,6 +499,8 @@ Category edits should affect historical data because expenses store category IDs
 
 When the user categorizes an imported item correctly, future similar items should learn that category/subcategory/recurrent flag. Mercado Pago additionally has stable identity rules as described above and can learn an explicitly edited description.
 
+Merchant learning also stores an explicit shared/personal choice. The learned value takes precedence over initial description/category rules for future imports.
+
 Two key cases:
 - Installments: descriptions with `01/06`, `02/06`, etc. should normalize to the same merchant/pattern.
 - Repeated merchants: e.g. `MERPAGO*TADA` should reuse prior categorization.
@@ -538,6 +550,7 @@ Current order:
 
 Dashboard filters:
 - household/all users or individual payer
+- all/shared/personal expense scope, independent from payer
 - category multi-select
 - category filter should affect all charts and metrics
 - filters occupy the full dashboard width; keep the height compact/adaptive to the number of categories
@@ -566,10 +579,15 @@ Expenses page:
 - show original currency/amount and totals in ARS and USD
 - uncategorized expenses should have a warning marker
 - expenses can be edited/deleted, including description/amount/category/recurrent/notes
+- notes are shown directly in the expense table; they do not require an expand/icon action
+- manual expense creation accepts the expense date, defaults the payer to the authenticated user, and includes `Debito MercadoPago` as a payment/source option
+- the XLS download exports every expense matching the current text, payer, currency, and shared/personal filters
 
 Imports page:
 - totals by currency must be prominent
+- Mercado Pago can be synchronized from this page for the authenticated user, but token connection/replacement/disconnection remains available only from Mi usuario
 - import review lines are editable before commit: category, subcategory, recurrent, notes, reimbursement when applicable
+- account XLS review defaults the payer to the authenticated user; descriptions are editable and persist in browser local storage per pending batch until commit or deletion
 - lines needing review show warning
 - processed imports should disappear from pending imports when no pending lines remain
 - pending parsed imports can be deleted if they have not created protected expenses

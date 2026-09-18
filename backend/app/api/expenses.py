@@ -10,7 +10,8 @@ from app.models import CashWalletEntry, Category, Earning, Expense, ExpenseSourc
 from app.schemas import ExpenseCreate, ExpenseRead, ExpenseUpdate
 from app.services.accounting import add_cash_expense_entry, amount_to_ars
 from app.services.audit import log_action
-from app.services.merchant_learning import learn_from_expense, learn_mercadopago_expense
+from app.services.categorizer import suggest_shared
+from app.services.merchant_learning import find_learned_suggestion, learn_from_expense, learn_mercadopago_expense
 from app.services.recurring import sync_recurring_rule
 
 router = APIRouter(prefix="/households/{home_group_id}/expenses", tags=["expenses"])
@@ -22,6 +23,7 @@ def list_expenses(
     paid_by_user_id: int | None = None,
     uploaded_by_user_id: int | None = None,
     category_id: int | None = None,
+    is_shared: bool | None = None,
     start: date | None = None,
     end: date | None = None,
     search: str | None = Query(default=None),
@@ -36,6 +38,8 @@ def list_expenses(
         stmt = stmt.where(Expense.uploaded_by_user_id == uploaded_by_user_id)
     if category_id:
         stmt = stmt.where(Expense.category_id == category_id)
+    if is_shared is not None:
+        stmt = stmt.where(Expense.is_shared.is_(is_shared))
     if start:
         stmt = stmt.where(Expense.date >= start)
     if end:
@@ -57,6 +61,12 @@ def create_expense(
     require_home_member(home_group_id, user, db)
     amount_ars = payload.amount_ars or amount_to_ars(db, payload.original_amount, payload.currency, payload.date)
     category_name = db.scalar(select(Category.name).where(Category.id == payload.category_id, Category.home_group_id == home_group_id)) if payload.category_id else None
+    learned = find_learned_suggestion(db, home_group_id, payload.description)
+    initial_shared = (
+        learned.is_shared
+        if learned and learned.has_shared_override
+        else suggest_shared(payload.description, category_name)
+    )
     expense = Expense(
         home_group_id=home_group_id,
         date=payload.date,
@@ -71,6 +81,7 @@ def create_expense(
         amount_ars=amount_ars,
         notes=payload.notes,
         is_recurring=payload.is_recurring or category_name in ("Suscripciones", "Servicios"),
+        is_shared=payload.is_shared if "is_shared" in payload.model_fields_set else initial_shared,
     )
     db.add(expense)
     db.flush()
@@ -108,7 +119,7 @@ def update_expense(
 
     updates = payload.model_dump(exclude_unset=True)
     previous_description = expense.description
-    for field in ["date", "description", "category_id", "subcategory_id", "paid_by_user_id", "currency", "source", "notes", "is_recurring"]:
+    for field in ["date", "description", "category_id", "subcategory_id", "paid_by_user_id", "currency", "source", "notes", "is_recurring", "is_shared"]:
         if field in updates:
             setattr(expense, field, updates[field])
     if "original_amount" in updates:
@@ -125,12 +136,13 @@ def update_expense(
     db.execute(delete(CashWalletEntry).where(CashWalletEntry.expense_id == expense.id))
     db.flush()
     add_cash_expense_entry(db, expense)
-    learn_from_expense(db, expense)
+    learn_from_expense(db, expense, learn_shared_scope="is_shared" in updates)
     learn_mercadopago_expense(
         db,
         expense,
         description_changed="description" in updates and expense.description != previous_description,
         categorization_submitted=bool({"category_id", "subcategory_id", "is_recurring"} & updates.keys()),
+        shared_scope_submitted="is_shared" in updates,
     )
     sync_recurring_rule(db, expense)
     log_action(

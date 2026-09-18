@@ -106,6 +106,8 @@ class Merchant(Base):
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_shared_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class MercadoPagoMerchantRule(Base):
@@ -122,6 +124,8 @@ class MercadoPagoMerchantRule(Base):
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_shared_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -144,6 +148,7 @@ class Expense(Base):
     import_line_id: Mapped[int | None] = mapped_column(ForeignKey("import_lines.id"), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -174,6 +179,7 @@ class ImportBatch(Base):
     statement_account: Mapped[str | None] = mapped_column(String(80), nullable=True)
     period_label: Mapped[str | None] = mapped_column(String(80), nullable=True)
     statement_period: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    card_network: Mapped[str | None] = mapped_column(String(40), nullable=True)
     fx_rate_ars_per_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="parsed")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -196,6 +202,7 @@ class ImportLine(Base):
     suggested_category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     suggested_subcategory_id: Mapped[int | None] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
     suggested_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+    suggested_shared: Mapped[bool] = mapped_column(Boolean, default=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="pending")
     fingerprint: Mapped[str] = mapped_column(String(128))

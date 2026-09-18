@@ -59,6 +59,7 @@ class MerchantLearningTests(unittest.TestCase):
             original_amount=Decimal("1000.00"),
             amount_ars=Decimal("1000.00"),
             is_recurring=True,
+            is_shared=True,
         )
         self.db.add(expense)
         self.db.flush()
@@ -70,6 +71,8 @@ class MerchantLearningTests(unittest.TestCase):
         self.assertEqual(learned.category_id, category.id)
         self.assertEqual(learned.subcategory_id, subcategory.id)
         self.assertTrue(learned.is_recurring)
+        self.assertTrue(learned.has_shared_override)
+        self.assertTrue(learned.is_shared)
 
     def test_services_are_recurring_by_default(self):
         category = Category(home_group_id=1, name="Servicios", color="#ff9800", icon="receipt")

@@ -27,6 +27,37 @@ DEFAULT_RULES = {
     "ACA ": "Transporte",
 }
 
+SHARED_DESCRIPTION_TOKENS = (
+    "SUPERMERC",
+    "CARREFOUR",
+    "COTO",
+    "JUMBO",
+    "DISCO",
+    "CHANGOMAS",
+    "CHANGO MAS",
+    "VEA ",
+    "DIA %",
+    "DIA ONLINE",
+    "CARNICER",
+    "FRIGORIFICO",
+    "VERDULER",
+)
+
+PERSONAL_SERVICE_TOKENS = (
+    "OPENAI",
+    "CHATGPT",
+    "TELEFONIA MOVIL",
+    "TELEFONO MOVIL",
+    "LINEA MOVIL",
+    "MOVISTAR MOVIL",
+    "CLARO MOVIL",
+    "PERSONAL FLOW MOVIL",
+    "TUENTI",
+)
+
+MOBILE_PROVIDER_TOKENS = ("MOVISTAR", "CLARO", "PERSONAL", "TUENTI")
+HOME_SERVICE_TOKENS = ("HOGAR", "FIBRA", "INTERNET", "BANDA ANCHA", "FLOW")
+
 
 @dataclass(frozen=True)
 class CategorySuggestion:
@@ -41,3 +72,15 @@ def suggest_category(description: str) -> CategorySuggestion | None:
         if token in normalized:
             return CategorySuggestion(category, 0.9, f"Regla local: {token}")
     return None
+
+
+def suggest_shared(description: str, category_name: str | None = None) -> bool:
+    """Return the initial household/personal suggestion for a new expense."""
+    normalized = description.upper()
+    if any(token in normalized for token in PERSONAL_SERVICE_TOKENS):
+        return False
+    if any(token in normalized for token in MOBILE_PROVIDER_TOKENS) and not any(token in normalized for token in HOME_SERVICE_TOKENS):
+        return False
+    if category_name == "Servicios":
+        return True
+    return any(token in normalized for token in SHARED_DESCRIPTION_TOKENS)

@@ -16,7 +16,7 @@ from app.services.accounting import amount_to_ars
 from app.services.audit import log_action
 from app.services.bbva_account_parser import parse_bbva_account_xls
 from app.services.bbva_parser import parse_bbva_visa_pdf
-from app.services.categorizer import suggest_category
+from app.services.categorizer import suggest_category, suggest_shared
 from app.services.merchant_learning import find_learned_suggestion, learn_from_expense
 from app.services.recurring import should_suggest_recurring, sync_recurring_rule
 from app.services.statement_period import infer_card_statement_period, valid_statement_period
@@ -61,6 +61,7 @@ async def upload_bbva_visa(
         statement_account=parsed.account,
         period_label=parsed.period_label,
         statement_period=infer_card_statement_period(parsed.period_label),
+        card_network=parsed.card_network,
     )
     db.add(batch)
     db.flush()
@@ -68,7 +69,7 @@ async def upload_bbva_visa(
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
     for line in parsed.lines:
-        suggested_category_id, suggested_subcategory_id, suggested_recurring = _suggest_import_line(
+        suggested_category_id, suggested_subcategory_id, suggested_recurring, suggested_shared = _suggest_import_line(
             db,
             home_group_id,
             line.description,
@@ -89,6 +90,7 @@ async def upload_bbva_visa(
                 suggested_category_id=suggested_category_id,
                 suggested_subcategory_id=suggested_subcategory_id,
                 suggested_recurring=suggested_recurring,
+                suggested_shared=suggested_shared or _is_mauro_name(line.cardholder_name) and parsed.card_network == "mastercard",
                 fingerprint=f"{batch.id}:{line.fingerprint}",
                 raw_text=line.raw_text,
             )
@@ -129,7 +131,7 @@ async def upload_bbva_account(
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
     for line in parsed.lines:
-        suggested_category_id, suggested_subcategory_id, suggested_recurring = _suggest_import_line(
+        suggested_category_id, suggested_subcategory_id, suggested_recurring, suggested_shared = _suggest_import_line(
             db,
             home_group_id,
             line.description,
@@ -150,6 +152,7 @@ async def upload_bbva_account(
                 suggested_category_id=suggested_category_id,
                 suggested_subcategory_id=suggested_subcategory_id,
                 suggested_recurring=suggested_recurring,
+                suggested_shared=suggested_shared,
                 fingerprint=f"{batch.id}:{line.fingerprint}",
                 raw_text=line.raw_text,
             )
@@ -242,6 +245,8 @@ def commit_import(
             )
         )
     )
+    for line in lines:
+        line.description = payload.description_overrides.get(line.id, line.description)
     offset_recurring_line_ids = _reintegrated_recurring_line_ids(db, batch, lines, payload)
     if batch and batch.fx_rate_ars_per_usd is None:
         batch.fx_rate_ars_per_usd = _fx_rate_for_import_date(db, batch.created_at.date() if batch.created_at else date.today())
@@ -256,6 +261,10 @@ def commit_import(
         subcategory_id = payload.subcategory_overrides.get(line.id, line.suggested_subcategory_id)
         paid_by_user_id = payload.paid_by_overrides.get(line.id, payload.paid_by_user_id)
         is_recurring = payload.recurring_overrides.get(line.id, line.suggested_recurring) and line.id not in offset_recurring_line_ids
+        is_shared = payload.shared_overrides.get(
+            line.id,
+            line.suggested_shared or _is_mauro_mastercard_expense(db, batch, paid_by_user_id),
+        )
         is_reimbursement = payload.reimbursement_overrides.get(line.id, False) or line.kind == ImportLineKind.reimbursement
         line.notes = payload.note_overrides.get(line.id, line.notes)
         conversion_date = batch.created_at.date() if batch else line.date
@@ -329,6 +338,7 @@ def commit_import(
             import_line_id=line.id,
             notes=line.notes,
             is_recurring=is_recurring,
+            is_shared=is_shared,
         )
         db.add(expense)
         db.flush()
@@ -392,6 +402,7 @@ def _read_batch(db: Session, batch_id: int) -> ImportBatchRead:
         statement_account=batch.statement_account,
         period_label=batch.period_label,
         statement_period=batch.statement_period or infer_card_statement_period(batch.period_label),
+        card_network=batch.card_network,
         fx_rate_ars_per_usd=batch.fx_rate_ars_per_usd,
         status=batch.status,
         created_at=batch.created_at.isoformat() if batch.created_at else None,
@@ -442,23 +453,31 @@ def _fx_rate_for_import_date(db: Session, rate_date: date) -> Decimal:
 
 
 def _fill_missing_suggestion(db: Session, line: ImportLine) -> None:
-    if line.suggested_category_id is not None:
-        if not line.suggested_recurring:
-            line.suggested_recurring = should_suggest_recurring(db, line.home_group_id, line.description, line.suggested_category_id)
-        return
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == line.home_group_id))}
-    category_id, subcategory_id, is_recurring = _suggest_import_line(
+    category_id, subcategory_id, is_recurring, _ = _suggest_import_line(
         db,
         line.home_group_id,
         line.description,
         categories,
         _subcategories_by_name(db, line.home_group_id),
     )
-    if category_id is None:
-        return
-    line.suggested_category_id = category_id
-    line.suggested_subcategory_id = subcategory_id
-    line.suggested_recurring = is_recurring
+    if line.suggested_category_id is None and category_id is not None:
+        line.suggested_category_id = category_id
+        line.suggested_subcategory_id = subcategory_id
+    current_category_id = line.suggested_category_id or category_id
+    current_category_name = next((name for name, category_id in categories.items() if category_id == current_category_id), None)
+    learned = find_learned_suggestion(db, line.home_group_id, line.description)
+    line.suggested_recurring = line.suggested_recurring or is_recurring or should_suggest_recurring(
+        db, line.home_group_id, line.description, current_category_id
+    )
+    line.suggested_shared = (
+        learned.is_shared
+        if learned and learned.has_shared_override
+        else suggest_shared(line.description, current_category_name)
+    )
+    batch = db.get(ImportBatch, line.import_batch_id)
+    if batch and batch.card_network == "mastercard" and _is_mauro_name(line.cardholder_name):
+        line.suggested_shared = True
     db.flush()
 
 
@@ -468,13 +487,15 @@ def _suggest_import_line(
     description: str,
     categories: dict[str, int],
     subcategories: dict[tuple[int, str], int],
-) -> tuple[int | None, int | None, bool]:
+) -> tuple[int | None, int | None, bool, bool]:
     learned = find_learned_suggestion(db, home_group_id, description)
     if learned and learned.category_id is not None:
+        category_name = next((name for name, category_id in categories.items() if category_id == learned.category_id), None)
         return (
             learned.category_id,
             learned.subcategory_id,
             learned.is_recurring or should_suggest_recurring(db, home_group_id, description, learned.category_id),
+            learned.is_shared if learned.has_shared_override else suggest_shared(description, category_name),
         )
     suggestion = suggest_category(description)
     suggested_category_id = categories.get(suggestion.name) if suggestion else None
@@ -482,7 +503,19 @@ def _suggest_import_line(
         suggested_category_id,
         _suggest_subcategory_id(description, suggested_category_id, subcategories),
         should_suggest_recurring(db, home_group_id, description, suggested_category_id),
+        learned.is_shared if learned and learned.has_shared_override else suggest_shared(description, suggestion.name if suggestion else None),
     )
+
+
+def _is_mauro_name(value: str | None) -> bool:
+    return bool(value and "MAURO" in value.upper())
+
+
+def _is_mauro_mastercard_expense(db: Session, batch: ImportBatch | None, paid_by_user_id: int) -> bool:
+    if batch is None or batch.card_network != "mastercard":
+        return False
+    payer = db.get(User, paid_by_user_id)
+    return payer is not None and _is_mauro_name(payer.display_name)
 
 
 def _is_bank_financial_movement(line: ImportLine) -> bool:
