@@ -1870,7 +1870,7 @@ function Expenses(props: {
   onDelete: (id: number) => void;
 }) {
   const [expenseDate, setExpenseDate] = useState(() => currentDateInputValue());
-  const [amount, setAmount] = useState("0");
+  const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [notes, setNotes] = useState("");
   const [paidByUserId, setPaidByUserId] = useState(String(props.currentUserId));
@@ -2001,7 +2001,7 @@ function Expenses(props: {
                 is_shared: isShared
               });
               setDescription("");
-              setAmount("0");
+              setAmount("");
               setNotes("");
               setSubcategoryId("");
               setIsRecurring(false);
@@ -2093,7 +2093,7 @@ function Expenses(props: {
                 <th><button className="sort-header" onClick={() => updateSort("paid_by")}>Pago{sortIndicator(sort, "paid_by")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("category")}>Categoria{sortIndicator(sort, "category")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("source")}>Origen{sortIndicator(sort, "source")}</button></th>
-                <th><button className="sort-header" onClick={() => updateSort("shared")}>Alcance{sortIndicator(sort, "shared")}</button></th>
+                <th><button className="sort-header" onClick={() => updateSort("shared")}>Compartido{sortIndicator(sort, "shared")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("recurring")}>Recurrente{sortIndicator(sort, "recurring")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("amount")}>Importe{sortIndicator(sort, "amount")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("notes")}>Nota{sortIndicator(sort, "notes")}</button></th>
@@ -2178,10 +2178,15 @@ function Expenses(props: {
                             <td>{sourceLabel(expense.source)}</td>
                             <td>
                               {isEditing ? (
-                                <select value={editIsShared ? "shared" : "personal"} onChange={(event) => setEditIsShared(event.target.value === "shared")} aria-label={`Editar alcance ${expense.description}`}>
-                                  <option value="shared">Compartido</option>
-                                  <option value="personal">Personal</option>
-                                </select>
+                                <label className="check-row form-check">
+                                  <input
+                                    type="checkbox"
+                                    checked={editIsShared}
+                                    onChange={(event) => setEditIsShared(event.target.checked)}
+                                    aria-label={`Editar compartido ${expense.description}`}
+                                  />
+                                  Compartido
+                                </label>
                               ) : (
                                 <span className={expense.is_shared ? "chip shared-chip" : "chip"}>{expense.is_shared ? "Compartido" : "Personal"}</span>
                               )}

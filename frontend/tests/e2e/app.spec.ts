@@ -66,11 +66,13 @@ test("core bills workflow renders and supports import review", async ({ page, re
 
   await page.getByRole("button", { name: "Consumos" }).click();
   await expect(page.getByRole("heading", { name: "Consumos del hogar" })).toBeVisible();
+  await expect(page.getByLabel("Importe")).toHaveValue("");
   await page.getByRole("button", { name: "Importe" }).click();
   await expect(page.getByRole("button", { name: "Importe ↓" })).toBeVisible();
   await page.getByLabel("Descripcion").fill("Cafe de prueba");
   await page.getByLabel("Importe").fill("4500");
   await page.getByRole("button", { name: "Agregar" }).click();
+  await expect(page.getByLabel("Importe")).toHaveValue("");
   await page.getByPlaceholder("Buscar gasto").fill("Cafe");
   await expect(page.getByText("Cafe de prueba")).toBeVisible();
   await page.getByRole("button", { name: "Editar gasto Cafe de prueba" }).click();
@@ -218,7 +220,9 @@ test("shared scope can be edited and filters expenses and dashboard", async ({ p
   await expect(page.getByText("Compra personal prueba")).toBeVisible();
 
   await page.getByRole("button", { name: "Editar gasto Compra personal prueba" }).click();
-  await page.getByLabel("Editar alcance Compra personal prueba").selectOption("shared");
+  const sharedCheckbox = page.getByLabel("Editar compartido Compra personal prueba");
+  await expect(sharedCheckbox).not.toBeChecked();
+  await sharedCheckbox.check();
   await page.getByRole("button", { name: "Guardar gasto Compra personal prueba" }).click();
   await expect(page.getByText("Compra personal prueba")).toHaveCount(0);
   await page.getByLabel("Filtrar gastos por alcance").selectOption("shared");
