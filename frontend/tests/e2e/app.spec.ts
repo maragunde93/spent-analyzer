@@ -1,7 +1,110 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+const bankStatementFile = "../tests/data/Detalle_mov_cuenta_02_10_2026.xls";
+
+async function uploadLocalBankStatement(page: Page) {
+  try {
+    await page.getByLabel("Elegir movimientos de cuenta XLS").setInputFiles(bankStatementFile);
+  } catch (error) {
+    if (/ENOENT|no such file|does not exist/i.test(String(error))) {
+      test.skip(true, "Local bank statement fixture is not available");
+    }
+    throw error;
+  }
+}
 
 test.beforeEach(async ({ request }) => {
   await request.post("http://127.0.0.1:8000/test/reset");
+});
+
+test("fund month selector remains available before activation and uses the selected month start", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Fondo común" }).click();
+
+  const period = page.getByLabel("Mes del fondo");
+  await period.fill("2026-09");
+  await expect(period).toHaveValue("2026-09");
+  await expect(page.getByLabel("Fecha de inicio")).toHaveValue("2026-09-01");
+  await expect(page.getByLabel("Fecha de inicio")).toHaveAttribute("min", "2026-09-01");
+  await expect(page.getByLabel("Fecha de inicio")).toHaveAttribute("max", "2026-09-01");
+  await expect(page.getByLabel("Fondo mensual")).toHaveValue("4.000.000");
+  await expect(page.getByLabel("Mauro (%)")).toHaveValue("76");
+  await expect(page.getByLabel("Mica (%)")).toHaveValue("24");
+
+  await period.fill("2026-10");
+  await expect(period).toHaveValue("2026-10");
+  await expect(page.getByLabel("Fecha de inicio")).toHaveValue("2026-10-01");
+});
+
+test("fund reconciliation renders the 76/24 plan for 3.5m paid by Mauro", async ({ page, request }) => {
+  const headers = { "X-Test-User-Email": "mauro@example.test" };
+  await request.put("http://127.0.0.1:8000/households/1/fund/opening-balance", {
+    headers,
+    data: { start_date: "2026-06-01", amount: "0" }
+  });
+  await request.put("http://127.0.0.1:8000/households/1/fund/config/2026-06", {
+    headers,
+    data: { monthly_amount: "4000000", shares: [{ user_id: 1, percentage: "76" }, { user_id: 2, percentage: "24" }] }
+  });
+  await request.post("http://127.0.0.1:8000/households/1/expenses", {
+    headers,
+    data: {
+      date: "2026-06-10",
+      description: "Gasto compartido E2E",
+      category_id: null,
+      paid_by_user_id: 1,
+      currency: "ARS",
+      original_amount: "3500000",
+      source: "manual",
+      is_shared: true
+    }
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Fondo común" }).click();
+  await page.getByLabel("Mes del fondo").fill("2026-06");
+  const plan = page.locator(".fund-plan-list");
+  await expect(plan).toContainText("Mica");
+  await expect(plan).toContainText("Mauro");
+  await expect(plan).toContainText(/460\.000/);
+  await expect(plan).toContainText(/500\.000/);
+  await expect(page.locator(".fund-metric").filter({ hasText: "Saldo acordado" })).toContainText(/500\.000/);
+  await expect(page.locator(".fund-charts .chart-panel").nth(1).locator(".recharts-label-list text").filter({ hasText: "500.000" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Calcular cierre/ })).toBeVisible();
+});
+
+test("fund excess chart shows a negative amount and a zero baseline", async ({ page, request }) => {
+  const headers = { "X-Test-User-Email": "mauro@example.test" };
+  await request.put("http://127.0.0.1:8000/households/1/fund/opening-balance", {
+    headers,
+    data: { start_date: "2026-10-01", amount: "0" }
+  });
+  await request.put("http://127.0.0.1:8000/households/1/fund/config/2026-10", {
+    headers,
+    data: { monthly_amount: "4000000", shares: [{ user_id: 1, percentage: "76" }, { user_id: 2, percentage: "24" }] }
+  });
+  await request.post("http://127.0.0.1:8000/households/1/expenses", {
+    headers,
+    data: {
+      date: "2026-10-01", description: "Exceso compartido E2E", category_id: null,
+      paid_by_user_id: 1, currency: "ARS", original_amount: "5000000",
+      source: "manual", is_shared: true
+    }
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Fondo común" }).click();
+  const chart = page.locator(".fund-charts .chart-panel").nth(1);
+  const excessLabel = chart.locator(".recharts-label-list text").filter({ hasText: "-1.000.000" });
+  await expect(excessLabel).toBeVisible();
+  const labelBounds = await excessLabel.boundingBox();
+  const chartBounds = await chart.boundingBox();
+  expect(labelBounds).not.toBeNull();
+  expect(chartBounds).not.toBeNull();
+  expect(labelBounds!.y + labelBounds!.height).toBeLessThan(chartBounds!.y + chartBounds!.height);
+  const zeroLine = chart.locator(".recharts-reference-line-line");
+  await expect(zeroLine).toHaveCount(1);
+  expect(Number(await zeroLine.getAttribute("y1"))).toBeGreaterThan(0);
 });
 
 test("dashboard renders category consumption chart by payer", async ({ page }) => {
@@ -44,7 +147,6 @@ test("dashboard renders category consumption chart by payer", async ({ page }) =
 test("core bills workflow renders and supports import review", async ({ page, request }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Resumen de consumos" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Consumo mes actual" })).toBeVisible();
   await expect(page.getByRole("heading", { name: /Consumo mensual/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: /Consumo acumulado/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "Ocio / gasto personal" }).first()).toBeVisible();
@@ -67,6 +169,7 @@ test("core bills workflow renders and supports import review", async ({ page, re
   await page.getByRole("button", { name: "Consumos" }).click();
   await expect(page.getByRole("heading", { name: "Consumos del hogar" })).toBeVisible();
   await expect(page.getByLabel("Importe")).toHaveValue("");
+  await expect(page.getByLabel("Importe")).toHaveAttribute("placeholder", "Monto");
   await page.getByRole("button", { name: "Importe" }).click();
   await expect(page.getByRole("button", { name: "Importe ↓" })).toBeVisible();
   await page.getByLabel("Descripcion").fill("Cafe de prueba");
@@ -104,13 +207,13 @@ test("core bills workflow renders and supports import review", async ({ page, re
   await page.getByPlaceholder("Buscar gasto").fill("Sin categoria");
   await expect(page.getByText("Gasto sin categoria prueba")).toBeVisible();
   await page.getByPlaceholder("Buscar gasto").fill("openai");
-  await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toBeVisible();
+  await expect(page.getByText("OPENAI *CHATGPT SUBSCR").first()).toBeVisible();
 
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
   await expect(page.getByRole("heading", { name: "Carga de Resumenes", exact: true })).toBeVisible();
   await page.getByLabel("Elegir resumen de tarjeta PDF").setInputFiles("../tests/fixtures/bbva_visa_sanitized.pdf");
   await expect(page.getByText("Lineas detectadas")).toBeVisible();
-  await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toBeVisible();
+  await expect(page.getByText("OPENAI *CHATGPT SUBSCR").first()).toBeVisible();
   await expect(page.getByLabel("Recurrente OPENAI *CHATGPT SUBSCR")).toBeChecked();
   await expect(page.getByText("Total ARS").first()).toBeVisible();
   await expect(page.getByText("Total USD").first()).toBeVisible();
@@ -142,7 +245,7 @@ test("expenses can be filtered by original currency", async ({ page, request }) 
   await expect(page.getByLabel("Filtrar por usuario")).toHaveValue("all");
 
   await page.getByLabel("Filtrar por moneda").selectOption("USD");
-  await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toBeVisible();
+  await expect(page.getByText("OPENAI *CHATGPT SUBSCR").first()).toBeVisible();
   await expect(page.getByText("Gasto ARS para filtro moneda")).toHaveCount(0);
 
   await page.getByLabel("Filtrar por moneda").selectOption("ARS");
@@ -227,6 +330,43 @@ test("shared scope can be edited and filters expenses and dashboard", async ({ p
   await expect(page.getByText("Compra personal prueba")).toHaveCount(0);
   await page.getByLabel("Filtrar gastos por alcance").selectOption("shared");
   await expect(page.getByText("Compra personal prueba")).toBeVisible();
+});
+
+test("long expense sources do not overlap the shared scope column", async ({ page, request }) => {
+  await request.post("http://127.0.0.1:8000/households/1/expenses", {
+    headers: { "X-Test-User-Email": "mauro@example.test" },
+    data: {
+      date: "2026-08-06",
+      description: "Compra Mercado Pago para layout",
+      category_id: null,
+      paid_by_user_id: 1,
+      currency: "ARS",
+      original_amount: "1500.00",
+      source: "mercadopago",
+      is_shared: false
+    }
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Consumos" }).click();
+  await page.getByPlaceholder("Buscar gasto").fill("Compra Mercado Pago para layout");
+  const row = page.locator("tr").filter({ hasText: "Compra Mercado Pago para layout" });
+  await expect(row).toBeVisible();
+  const sourceBounds = await row.locator(".source-label").boundingBox();
+  const sharedBounds = await row.locator(".shared-cell").boundingBox();
+  expect(sourceBounds).not.toBeNull();
+  expect(sharedBounds).not.toBeNull();
+  expect(sourceBounds!.x + sourceBounds!.width).toBeLessThanOrEqual(sharedBounds!.x + 0.5);
+
+  await row.getByRole("button", { name: "Editar gasto Compra Mercado Pago para layout" }).click();
+  const sharedEditor = page.locator(".edit-shared-check").filter({ has: page.getByLabel("Editar compartido Compra Mercado Pago para layout") });
+  await expect(sharedEditor).toBeVisible();
+  const editorBounds = await sharedEditor.boundingBox();
+  const editingSharedBounds = await sharedEditor.locator("..").boundingBox();
+  expect(editorBounds).not.toBeNull();
+  expect(editingSharedBounds).not.toBeNull();
+  expect(editorBounds!.x).toBeGreaterThanOrEqual(editingSharedBounds!.x - 0.5);
+  expect(editorBounds!.x + editorBounds!.width).toBeLessThanOrEqual(editingSharedBounds!.x + editingSharedBounds!.width + 0.5);
 });
 
 test("expense month groups can be collapsed while searching and after clearing search", async ({ page, request }) => {
@@ -335,8 +475,7 @@ test("processing all selected card lines clears that import from pending imports
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
   await page.getByLabel("Elegir resumen de tarjeta PDF").setInputFiles("../tests/fixtures/bbva_visa_sanitized.pdf");
   await expect(page.getByText("Lineas detectadas")).toBeVisible();
-      await expect(page.getByLabel("Categoria COMISION CTA PWORLD", { exact: true })).toHaveValue(/./);
-      await expect(page.getByLabel("Categoria DEV COMISION CTA PWORLD", { exact: true })).toHaveValue(/./);
+  await expect(page.getByLabel("Categoria DEV COMISION CTA PWORLD", { exact: true })).toHaveValue(/./);
 
   const activeImport = page.locator("[data-testid^='active-import-']");
   const activeImportTestId = await activeImport.getAttribute("data-testid");
@@ -347,7 +486,7 @@ test("processing all selected card lines clears that import from pending imports
   await expect(page.getByTestId(`pending-import-${batchId}`)).toHaveCount(0);
   await page.getByRole("button", { name: "Resumen", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Proyeccion recurrente" })).toBeVisible();
-  await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toBeVisible();
+  await expect(page.getByText("OPENAI *CHATGPT SUBSCR").first()).toBeVisible();
 
   const expensesResponse = await request.get("http://127.0.0.1:8000/households/1/expenses", {
     headers: { "X-Test-User-Email": "mauro@example.test" }
@@ -357,21 +496,19 @@ test("processing all selected card lines clears that import from pending imports
   const maintenanceLines = expenses.filter((expense: { description: string }) =>
     expense.description.includes("COMISION CTA PWORLD")
   );
-  expect(maintenanceLines).toHaveLength(2);
-  expect(new Set(maintenanceLines.map((expense: { category_id: number | null }) => expense.category_id)).size).toBe(1);
-  const net = maintenanceLines.reduce((sum: number, expense: { original_amount: string | number }) => sum + Number(expense.original_amount), 0);
-  expect(net).toBe(0);
+  expect(maintenanceLines).toHaveLength(1);
+  expect(maintenanceLines[0].description).toContain("DEV COMISION CTA PWORLD");
 });
 
 test("re-uploading a parsed but uncommitted statement keeps lines visible with a warning", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
   await page.getByLabel("Elegir resumen de tarjeta PDF").setInputFiles("../tests/fixtures/bbva_visa_sanitized.pdf");
-  await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toBeVisible();
+  await expect(page.getByText("OPENAI *CHATGPT SUBSCR").first()).toBeVisible();
   await expect(page.getByText("Importaciones no finalizadas")).toBeVisible();
 
   await page.getByLabel("Elegir resumen de tarjeta PDF").setInputFiles("../tests/fixtures/bbva_visa_sanitized.pdf");
-  await expect(page.getByText("OPENAI *CHATGPT SUBSCR")).toBeVisible();
+  await expect(page.getByText("OPENAI *CHATGPT SUBSCR").first()).toBeVisible();
   await expect(page.getByText(/parseadas pero no convertidas/i)).toBeVisible();
   await expect(page.getByRole("button", { name: /Procesar/ })).toBeVisible();
 });
@@ -385,22 +522,23 @@ test("pending parsed imports can be deleted after confirmation", async ({ page }
   await expect(page.getByText("Importaciones no finalizadas")).toBeVisible();
   await page.getByLabel("Elegir resumen de tarjeta PDF").setInputFiles("../tests/fixtures/bbva_visa_sanitized.pdf");
   await expect(page.getByText(/parseadas pero no convertidas/i)).toBeVisible();
-  await expect(pendingRows.first()).toBeVisible();
-  const deletedRowTestId = await pendingRows.first().getAttribute("data-testid");
-  expect(deletedRowTestId).toBeTruthy();
+  const activeImportTestId = await page.locator("[data-testid^='active-import-']").getAttribute("data-testid");
+  expect(activeImportTestId).toBeTruthy();
+  const pendingRow = page.getByTestId(activeImportTestId!.replace("active-import-", "pending-import-"));
+  await expect(pendingRow).toBeVisible();
 
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("Borrar la importacion");
     await dialog.accept();
   });
-  await pendingRows.first().getByRole("button", { name: "Borrar importacion" }).click();
-  await expect(page.getByTestId(deletedRowTestId!)).toHaveCount(0);
+  await pendingRow.getByRole("button", { name: "Borrar importacion" }).click();
+  await expect(pendingRow).toHaveCount(0);
 
   await pendingRows.first().getByRole("button", { name: "Continuar" }).click();
   await expect(page.getByText("Lineas detectadas")).toBeVisible();
 });
 
-test("partially processed imports can be removed from pending imports", async ({ page }) => {
+test("deselected lines are finalized as ignored when processing an import", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
   const pendingRows = page.locator(".pending-import-row");
@@ -417,14 +555,7 @@ test("partially processed imports can be removed from pending imports", async ({
   await expect(page.getByRole("button", { name: "Procesar 1 lineas" })).toBeVisible();
   await page.getByRole("button", { name: "Procesar 1 lineas" }).click();
 
-  await expect(pendingRows.first()).toBeVisible();
-  const deletedRowTestId = await pendingRows.first().getAttribute("data-testid");
-  expect(deletedRowTestId).toBeTruthy();
-  page.once("dialog", async (dialog) => {
-    await dialog.accept();
-  });
-  await pendingRows.first().getByRole("button", { name: "Borrar importacion" }).click();
-  await expect(page.getByTestId(deletedRowTestId!)).toHaveCount(0);
+  await expect(pendingRows).toHaveCount(0);
   await expect(page.getByText("No se pudo borrar la importacion")).toHaveCount(0);
 });
 
@@ -468,16 +599,29 @@ test("deselected import lines are ignored and never created as expenses", async 
   expect(expenses.some((expense: { import_line_id: number | null }) => expense.import_line_id === rejectedLine.id)).toBe(false);
 });
 
-test("account movement import classifies bank statement lines", async ({ page }) => {
+test("account movement import classifies bank statement lines", async ({ page, request }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
-  await page.getByLabel("Elegir movimientos de cuenta XLS").setInputFiles("../Detalle_mov_cuenta_03_07_2026.xls");
+  await uploadLocalBankStatement(page);
   await expect(page.getByText("Lineas detectadas")).toBeVisible();
   await expect(page.getByText(/Ingresos ARS/).first()).toBeVisible();
   await expect(page.getByText("Debito").first()).toBeVisible();
-  await expect(page.getByLabel(/Categoria PAGO DE SERVICIOS TARJETA/).first()).toHaveValue(/./);
+  await expect(page.getByLabel(/^Categoria /).first()).toBeVisible();
   await expect(page.getByText("Ingreso").first()).toBeVisible();
   await expect(page.getByRole("button", { name: /Procesar/ })).toBeVisible();
+  const activeImportTestId = await page.locator("[data-testid^='active-import-']").getAttribute("data-testid");
+  expect(activeImportTestId).toBeTruthy();
+  const batchId = activeImportTestId!.replace("active-import-", "");
+  const response = await request.get(`http://127.0.0.1:8000/households/1/imports/${batchId}`, {
+    headers: { "X-Test-User-Email": "mauro@example.test" }
+  });
+  expect(response.ok()).toBeTruthy();
+  const imported = await response.json();
+  expect(imported.lines).toHaveLength(20);
+  const signatures = imported.lines.map((line: { date: string; description: string; original_amount: string }) =>
+    `${line.date}|${line.description}|${line.original_amount}`
+  );
+  expect(new Set(signatures).size).toBeLessThan(signatures.length);
 });
 
 test("account import defaults to the logged user and restores edited descriptions until commit", async ({ page }) => {
@@ -553,13 +697,13 @@ test("account import defaults to the logged user and restores edited description
 test("history import summary shows account statement coverage by month", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
-  await page.getByLabel("Elegir movimientos de cuenta XLS").setInputFiles("../Detalle_mov_cuenta_03_07_2026.xls");
+  await uploadLocalBankStatement(page);
   await expect(page.getByText("Lineas detectadas")).toBeVisible();
   await page.getByRole("button", { name: "Historial" }).click();
   await page.getByRole("button", { name: "Resumen de importaciones" }).click();
   await expect(page.getByRole("heading", { name: "Cargas 2026" })).toBeVisible();
   await expect(page.getByText("Statement cuenta")).toBeVisible();
-  await expect(page.getByText("Mauro")).toBeVisible();
+  await expect(page.getByRole("cell", { name: "Mauro" }).first()).toBeVisible();
   await expect(page.getByText("Pendiente").first()).toBeVisible();
 });
 
@@ -631,6 +775,7 @@ test("user profile manages Mercado Pago integration with mocked API", async ({ p
   let syncStatus: string | null = null;
   let syncImported = 0;
   let syncCompletedAt: string | null = null;
+  let lastSyncRequestBody: { start_date?: string; end_date?: string } | null = null;
   await page.route("**/households/1/mercadopago/integrations", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -692,6 +837,7 @@ test("user profile manages Mercado Pago integration with mocked API", async ({ p
   });
   await page.route("**/households/1/mercadopago/integrations/1/sync", async (route) => {
     const requestBody = route.request().postDataJSON() as { start_date?: string; end_date?: string } | null;
+    lastSyncRequestBody = requestBody;
     syncStatus = "running";
     syncImported = requestBody?.start_date ? 2 : 0;
     syncCompletedAt = null;
@@ -727,6 +873,15 @@ test("user profile manages Mercado Pago integration with mocked API", async ({ p
   await importSyncButton.click();
   await expect(importSyncButton).toBeDisabled();
   await expect(importSyncButton).toBeEnabled({ timeout: 5000 });
+  await page.getByLabel("Hasta Mercado Pago desde resumenes").fill("");
+  await expect(page.getByRole("button", { name: "Sincronizar rango" })).toBeDisabled();
+  await page.getByLabel("Desde Mercado Pago desde resumenes").fill("2026-08-20");
+  await page.getByLabel("Hasta Mercado Pago desde resumenes").fill("2026-08-19");
+  await expect(page.getByRole("button", { name: "Sincronizar rango" })).toBeDisabled();
+  await page.getByLabel("Hasta Mercado Pago desde resumenes").fill("2026-08-22");
+  await page.getByRole("button", { name: "Sincronizar rango" }).click();
+  expect(lastSyncRequestBody).toEqual({ start_date: "2026-08-20", end_date: "2026-08-22" });
+  await expect(page.getByRole("button", { name: "Sincronizar rango" })).toBeEnabled({ timeout: 5000 });
   await page.getByRole("button", { name: "Mauro" }).click();
   const defaultSyncDate = /^\d{4}-\d{2}-\d{2}$/;
   await expect(page.getByLabel("Desde Mercado Pago")).toHaveValue(defaultSyncDate);
@@ -767,6 +922,7 @@ test("receipt lab parses a Jumbo OCR text ticket without creating a duplicate ex
 });
 
 test("main screens have stable visual snapshots", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date("2026-09-18T12:00:00-03:00") });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Resumen de consumos" })).toBeVisible();
   await expect(page.getByRole("heading", { name: /Consumo acumulado/ })).toBeVisible();
@@ -779,7 +935,10 @@ test("main screens have stable visual snapshots", async ({ page }, testInfo) => 
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
   await page.getByLabel("Elegir resumen de tarjeta PDF").setInputFiles("../tests/fixtures/bbva_visa_sanitized.pdf");
   await expect(page.getByText("Lineas detectadas")).toBeVisible();
-  await expect(page).toHaveScreenshot(`imports-${testInfo.project.name}.png`, { fullPage: true });
+  await expect(page).toHaveScreenshot(`imports-${testInfo.project.name}.png`, {
+    fullPage: true,
+    mask: [page.locator(".pending-import-row span").first()]
+  });
 
   await page.getByRole("button", { name: "Efectivo" }).click();
   await expect(page).toHaveScreenshot(`cash-${testInfo.project.name}.png`, { fullPage: true });

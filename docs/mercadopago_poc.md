@@ -30,6 +30,9 @@ Campos esperados por la integración actual:
 - `TRANSACTION_AMOUNT`, `REAL_AMOUNT` o `SETTLEMENT_NET_AMOUNT` para importe;
 - `TRANSACTION_CURRENCY` o `SETTLEMENT_CURRENCY` para moneda;
 - `PAYMENT_METHOD_TYPE`/`PAYMENT_METHOD` para distinguir `account_money` de tarjetas vinculadas.
+- `PAYER_NAME`, `PAYER_ID_TYPE` y `PAYER_ID_NUMBER` cuando Mercado Pago los entregue para identificar al originante de ingresos. `PAY_BANK_TRANSFER_ID` sirve para rastrear una transferencia puntual, pero no se toma como identidad estable del aportante.
+
+Para revisar un ingreso del fondo, la UI muestra el nombre del pagador y los últimos cuatro dígitos de su documento si aparecen en el reporte. La regla «Recordar origen» usa una huella del tipo y número de documento, no el nombre ni el ID de la transferencia. Si el reporte no trae esos campos, el ingreso queda pendiente de clasificación manual.
 
 Estado de validacion real (2026-09-17): el flujo fue probado correctamente con una cuenta real, incluyendo conexion, creacion/descarga del settlement report, importacion historica, enriquecimiento de nombres y resincronizacion idempotente. Hay una ultima prueba manual planificada antes de mergear la rama. Los tests permanentes siguen usando fixtures sinteticos; no se deben guardar tokens, CSVs ni respuestas reales en git.
 

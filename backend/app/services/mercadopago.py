@@ -51,6 +51,10 @@ MERCADOPAGO_REPORT_COLUMNS = (
     "BUSINESS_UNIT",
     "SUB_UNIT",
     "SALE_DETAIL",
+    "PAYER_NAME",
+    "PAYER_ID_TYPE",
+    "PAYER_ID_NUMBER",
+    "PAY_BANK_TRANSFER_ID",
 )
 
 CARD_METHOD_TYPES = {"credit_card", "debit_card", "prepaid_card"}
@@ -97,6 +101,7 @@ class MercadoPagoMovement:
     merchant_key: str | None = None
     collector_id: str | None = None
     store_id: str | None = None
+    origin_id: str | None = None
     ignored_reason: str | None = None
     notes: str | None = None
 
@@ -199,7 +204,7 @@ class MercadoPagoClient:
                 "begin_date": _utc_iso(begin),
                 "end_date": _utc_iso(end),
             },
-            accepted_statuses={200, 202, 203},
+            accepted_statuses={200, 202},
         )
 
     async def list_reports(self) -> list[dict[str, Any]]:
@@ -208,24 +213,39 @@ class MercadoPagoClient:
             raise MercadoPagoError("Mercado Pago devolvio un listado de reportes inesperado")
         return data
 
+    async def get_report_task(self, task_id: str) -> dict[str, Any]:
+        data = await self._request_json("GET", f"{self.api_base_url}/v1/account/settlement_report/task/{task_id}")
+        if not isinstance(data, dict):
+            raise MercadoPagoError("Mercado Pago devolvio un estado de reporte inesperado")
+        return data
+
     async def wait_for_report(
         self,
         begin: datetime,
         end: datetime,
         created_response: dict[str, Any] | None = None,
         poll_interval_seconds: float = 10.0,
-        timeout_seconds: float = 180.0,
+        timeout_seconds: float = 600.0,
     ) -> MercadoPagoReport:
-        direct_file = _file_name_from_report(created_response or {})
+        direct_file = _file_name_from_report(created_response or {}) if _report_is_ready(created_response or {}) else None
         if direct_file:
             return MercadoPagoReport(file_name=direct_file, raw=created_response or {})
 
         report_id = str((created_response or {}).get("id") or "").strip() or None
         deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
         while True:
-            report = self._matching_report(await self.list_reports(), begin, end, report_id=report_id)
+            if report_id:
+                try:
+                    report = await self.get_report_task(report_id)
+                except MercadoPagoNotFoundError:
+                    report = self._matching_report(await self.list_reports(), begin, end, report_id=report_id)
+            else:
+                report = self._matching_report(await self.list_reports(), begin, end)
             if report is not None:
-                file_name = _file_name_from_report(report)
+                status = str(report.get("status") or "").lower()
+                if status in {"failed", "error"}:
+                    raise MercadoPagoError("Mercado Pago no pudo generar el reporte")
+                file_name = _file_name_from_report(report) if _report_is_ready(report) else None
                 if file_name:
                     return MercadoPagoReport(file_name=file_name, raw=report)
             if datetime.now(timezone.utc) >= deadline:
@@ -352,6 +372,7 @@ async def enrich_movements(client: MercadoPagoClient, movements: list[MercadoPag
         merchant_key = None
         collector_id = None
         store_id = None
+        origin_id = movement.origin_id
         for payment_id in payment_ids:
             if payment_id not in payment_cache:
                 payment_cache[payment_id] = await client.get_payment(payment_id)
@@ -361,6 +382,7 @@ async def enrich_movements(client: MercadoPagoClient, movements: list[MercadoPag
             merchant_key = candidate_key or merchant_key
             collector_id = candidate_collector or collector_id
             store_id = candidate_store or store_id
+            origin_id = _payment_origin_id(payment) or origin_id
             if description or merchant_key:
                 break
         enriched.append(
@@ -370,6 +392,7 @@ async def enrich_movements(client: MercadoPagoClient, movements: list[MercadoPag
                 merchant_key=merchant_key,
                 collector_id=collector_id,
                 store_id=store_id,
+                origin_id=origin_id,
             )
         )
     return enriched
@@ -387,6 +410,13 @@ def _merchant_identity_from_payment(payment: dict[str, Any] | None) -> tuple[str
     return None, None, None
 
 
+def _payment_origin_id(payment: dict[str, Any] | None) -> str | None:
+    if not payment:
+        return None
+    payer_id = _text_path(payment, "payer", "id")
+    return f"payer:{payer_id}" if payer_id else None
+
+
 async def sync_integration(
     db: Session,
     integration: MercadoPagoIntegration,
@@ -394,7 +424,7 @@ async def sync_integration(
     client: MercadoPagoClient,
     overlap_days: int = 3,
     poll_interval_seconds: float = 10.0,
-    poll_timeout_seconds: float = 180.0,
+    poll_timeout_seconds: float = 600.0,
     now: datetime | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -632,6 +662,10 @@ def import_movements(
             category_id, subcategory_id, recurring = rule.category_id, rule.subcategory_id, rule.is_recurring
         if rule and rule.has_shared_override:
             shared = rule.is_shared
+        elif integration.fund_role == "fondo_comun" and movement.kind in (ImportLineKind.purchase, ImportLineKind.reimbursement):
+            learned = find_learned_suggestion(db, integration.home_group_id, description)
+            if not learned or not learned.has_shared_override:
+                shared = True
         line = ImportLine(
             import_batch_id=batch.id,
             home_group_id=integration.home_group_id,
@@ -653,6 +687,7 @@ def import_movements(
             mercadopago_merchant_key=movement.merchant_key,
             mercadopago_collector_id=movement.collector_id,
             mercadopago_store_id=movement.store_id,
+            mercadopago_origin_id=movement.origin_id,
         )
         db.add(line)
         db.flush()
@@ -757,7 +792,23 @@ def _movement_from_row(row: dict[str, str]) -> MercadoPagoMovement | None:
         raw=row,
         ignored_reason=ignored_reason,
         notes=None,
+        origin_id=_stable_origin_from_row(row),
     )
+
+
+def _stable_origin_from_row(row: dict[str, str]) -> str | None:
+    document = _first(row, "PAYER_ID_NUMBER")
+    document_type = _first(row, "PAYER_ID_TYPE").upper()
+    if document and document_type:
+        # Reuse a stable reconciliation key without exposing a document number
+        # in the fund UI or its learned-origin rules.
+        digest = hashlib.sha256(f"{document_type}:{document}".encode("utf-8")).hexdigest()[:24]
+        return f"payer_document:{document_type.lower()}:{digest}"
+    for key in ("PAYER_ID", "SENDER_ID", "COUNTERPART_ID", "ORIGIN_ID"):
+        value = _first(row, key)
+        if value:
+            return f"{key.lower()}:{value}"[:120]
+    return None
 
 
 def _create_expense(db: Session, integration: MercadoPagoIntegration, line: ImportLine) -> None:
@@ -827,6 +878,18 @@ def _backfill_mercadopago_identity(line: ImportLine, movement: MercadoPagoMoveme
         line.mercadopago_collector_id = movement.collector_id
     if not line.mercadopago_store_id and movement.store_id:
         line.mercadopago_store_id = movement.store_id
+    if not line.mercadopago_origin_id and movement.origin_id:
+        line.mercadopago_origin_id = movement.origin_id
+    try:
+        previous_raw = json.loads(line.raw_text) if line.raw_text else {}
+    except (TypeError, ValueError):
+        previous_raw = {}
+    if not isinstance(previous_raw, dict):
+        previous_raw = {}
+    for field in ("PAYER_NAME", "PAYER_ID_TYPE", "PAYER_ID_NUMBER", "PAY_BANK_TRANSFER_ID", "PAYMENT_METHOD_TYPE"):
+        if not previous_raw.get(field) and movement.raw.get(field):
+            previous_raw[field] = movement.raw[field]
+    line.raw_text = json.dumps(previous_raw, ensure_ascii=True, sort_keys=True)
 
 
 def _should_reimport_existing_line(db: Session, line: ImportLine, movement: MercadoPagoMovement) -> bool:
@@ -1096,7 +1159,24 @@ def _contains_any(value: str, tokens: tuple[str, ...]) -> bool:
 
 def _file_name_from_report(report: dict[str, Any]) -> str | None:
     value = report.get("file_name") or report.get("filename")
-    return str(value) if value else None
+    if value:
+        return str(value)
+    files = report.get("files")
+    if not isinstance(files, list):
+        return None
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        file_type = str(item.get("type") or "").lower()
+        if name and (file_type in {"csv", "text/csv"} or str(name).lower().endswith(".csv")):
+            return str(name)
+    return None
+
+
+def _report_is_ready(report: dict[str, Any]) -> bool:
+    status = str(report.get("status") or "").lower()
+    return status in {"", "processed", "available"}
 
 
 def _sync_window(last_sync_at: datetime | None, overlap_days: int, now: datetime) -> tuple[datetime, datetime]:
@@ -1130,7 +1210,7 @@ def _report_config_payload(existing: dict[str, Any] | None, mp_user_id: str | No
     frequency = (existing or {}).get("frequency")
     if not isinstance(frequency, dict):
         frequency = {"hour": 0, "type": "monthly", "value": 1}
-    return {
+    payload = {
         "file_name_prefix": prefix,
         "show_fee_prevision": bool((existing or {}).get("show_fee_prevision", False)),
         "show_chargeback_cancel": bool((existing or {}).get("show_chargeback_cancel", True)),
@@ -1144,6 +1224,9 @@ def _report_config_payload(existing: dict[str, Any] | None, mp_user_id: str | No
         "frequency": frequency,
         "columns": [{"key": key} for key in MERCADOPAGO_REPORT_COLUMNS],
     }
+    if existing is not None and isinstance(existing.get("notification_email_list"), list):
+        payload["notification_email_list"] = existing["notification_email_list"]
+    return payload
 
 
 def _report_config_needs_update(existing: dict[str, Any]) -> bool:

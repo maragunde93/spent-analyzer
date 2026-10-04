@@ -1,5 +1,5 @@
 import { categories, demoDashboard, demoExpenses, demoImport } from "./mockData";
-import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, HomeGroup, ImportBatch, MercadoPagoIntegration, MercadoPagoSyncAccepted, ReceiptImport, Subcategory, User } from "./types";
+import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, FundMpActivity, FundSeriesRow, FundSummary, HomeGroup, ImportBatch, MercadoPagoIntegration, MercadoPagoSyncAccepted, ReceiptImport, Subcategory, User } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "/api" : "/finance/api");
 const TEST_USER_EMAIL = import.meta.env.VITE_TEST_USER_EMAIL;
@@ -90,6 +90,38 @@ export const api = {
       `/households/${homeId}/mercadopago/integrations/${userId}`,
       { method: "DELETE" }
     ),
+  updateMercadoPagoFundRole: (homeId: number, userId: number, fundRole: "personal" | "fondo_comun") =>
+    request<MercadoPagoIntegration>(
+      `/households/${homeId}/mercadopago/integrations/${userId}/fund-role`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fund_role: fundRole }) }
+    ),
+  fundSummary: (homeId: number, period: string) => request<FundSummary>(`/households/${homeId}/fund/summary?period=${period}`),
+  updateFundConfig: (homeId: number, period: string, payload: { monthly_amount: string; shares: Array<{ user_id: number; percentage: string }> }) =>
+    request<FundSummary>(`/households/${homeId}/fund/config/${period}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+    }),
+  updateFundOpeningBalance: (homeId: number, payload: { start_date: string; amount: string }) =>
+    request<{ id: number; start_date: string; amount: string }>(`/households/${homeId}/fund/opening-balance`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+    }),
+  closeFundMonth: (homeId: number, period: string) => request<FundSummary>(`/households/${homeId}/fund/months/${period}/close`, { method: "POST" }),
+  approveFundMonth: (homeId: number, period: string) => request<FundSummary>(`/households/${homeId}/fund/months/${period}/approve`, { method: "POST" }),
+  reopenFundMonth: (homeId: number, period: string) => request<FundSummary>(`/households/${homeId}/fund/months/${period}/reopen`, { method: "POST" }),
+  fundSeries: (homeId: number) => request<FundSeriesRow[]>(`/households/${homeId}/fund/series`),
+  fundMpActivity: (homeId: number) => request<FundMpActivity>(`/households/${homeId}/fund/mp-activity`),
+  createFundMovement: (homeId: number, payload: { date: string; from_user_id: number | null; to_user_id: number | null; amount: string; note: string | null }) =>
+    request<{ id: number }>(`/households/${homeId}/fund/manual-movements`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+    }),
+  updateFundMovement: (homeId: number, movementId: number, payload: { date: string; from_user_id: number | null; to_user_id: number | null; amount: string; note: string | null }) =>
+    request<{ id: number }>(`/households/${homeId}/fund/manual-movements/${movementId}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+    }),
+  deleteFundMovement: (homeId: number, movementId: number) => request<{ ok: boolean }>(`/households/${homeId}/fund/manual-movements/${movementId}`, { method: "DELETE" }),
+  updateFundMpContribution: (homeId: number, earningId: number, payload: { classification: string; contributor_user_id: number | null; remember_origin?: boolean }) =>
+    request<{ ok: boolean }>(`/households/${homeId}/fund/mp-contributions/${earningId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+    }),
   dashboard: (homeId: number, paidByUserId?: string, categoryIds: number[] = [], sharedScope: "all" | "shared" | "personal" = "all") => {
     const search = new URLSearchParams();
     if (paidByUserId && paidByUserId !== "all") search.set("paid_by_user_id", paidByUserId);

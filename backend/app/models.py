@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
-from sqlalchemy import Boolean, Date, DateTime, Enum as SAEnum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Enum as SAEnum, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -54,6 +54,7 @@ class MercadoPagoIntegration(Base):
     mp_nickname: Mapped[str | None] = mapped_column(String(160), nullable=True)
     mp_site_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
     access_token: Mapped[str] = mapped_column(Text)
+    fund_role: Mapped[str] = mapped_column(String(24), default="personal")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_sync_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
@@ -210,6 +211,7 @@ class ImportLine(Base):
     mercadopago_merchant_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
     mercadopago_collector_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     mercadopago_store_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    mercadopago_origin_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
 
 class CashWalletEntry(Base):
@@ -264,6 +266,113 @@ class AuditLog(Base):
     currency: Mapped[Currency | None] = mapped_column(SAEnum(Currency), nullable=True)
     amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class FundMonthConfig(Base):
+    __tablename__ = "fund_month_configs"
+    __table_args__ = (UniqueConstraint("home_group_id", "period", name="uq_fund_config_home_period"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
+    period: Mapped[str] = mapped_column(String(7), index=True)
+    monthly_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FundMonthShare(Base):
+    __tablename__ = "fund_month_shares"
+    __table_args__ = (UniqueConstraint("config_id", "user_id", name="uq_fund_share_config_user"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    config_id: Mapped[int] = mapped_column(ForeignKey("fund_month_configs.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    percentage: Mapped[Decimal] = mapped_column(Numeric(7, 4))
+
+
+class FundOpeningBalance(Base):
+    __tablename__ = "fund_opening_balances"
+    __table_args__ = (UniqueConstraint("home_group_id", name="uq_fund_opening_home"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
+    start_date: Mapped[date] = mapped_column(Date)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FundMonthClosure(Base):
+    __tablename__ = "fund_month_closures"
+    __table_args__ = (UniqueConstraint("home_group_id", "period", name="uq_fund_closure_home_period"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
+    period: Mapped[str] = mapped_column(String(7), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="abierto")
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    agreed_closing_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FundClosureApproval(Base):
+    __tablename__ = "fund_closure_approvals"
+    __table_args__ = (UniqueConstraint("closure_id", "user_id", name="uq_fund_approval_closure_user"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    closure_id: Mapped[int] = mapped_column(ForeignKey("fund_month_closures.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    approved_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class FundManualMovement(Base):
+    __tablename__ = "fund_manual_movements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
+    date: Mapped[date] = mapped_column(Date, index=True)
+    from_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    to_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    note: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FundMpAssignment(Base):
+    __tablename__ = "fund_mp_assignments"
+    __table_args__ = (UniqueConstraint("earning_id", name="uq_fund_mp_assignment_earning"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
+    earning_id: Mapped[int] = mapped_column(ForeignKey("earnings.id"), index=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("mercadopago_integrations.id"), index=True)
+    contributor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    classification: Mapped[str] = mapped_column(String(32), default="pending")
+    stable_origin_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FundMpOriginRule(Base):
+    __tablename__ = "fund_mp_origin_rules"
+    __table_args__ = (UniqueConstraint("integration_id", "stable_origin_id", name="uq_fund_mp_origin_rule"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    home_group_id: Mapped[int] = mapped_column(ForeignKey("home_groups.id"), index=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("mercadopago_integrations.id"), index=True)
+    stable_origin_id: Mapped[str] = mapped_column(String(120))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class ReceiptImport(Base):

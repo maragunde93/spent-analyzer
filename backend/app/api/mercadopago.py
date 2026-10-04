@@ -9,7 +9,7 @@ from app.auth import get_current_user, require_home_member
 from app.config import get_settings
 from app.database import SessionLocal, get_db
 from app.models import MercadoPagoIntegration, User
-from app.schemas import MercadoPagoIntegrationRead, MercadoPagoSyncAccepted, MercadoPagoSyncRequest, MercadoPagoTokenUpdate
+from app.schemas import MercadoPagoFundRoleUpdate, MercadoPagoIntegrationRead, MercadoPagoSyncAccepted, MercadoPagoSyncRequest, MercadoPagoTokenUpdate
 from app.services.audit import log_action
 from app.services.mercadopago import MercadoPagoClient, MercadoPagoError, claim_mercadopago_sync, execute_mercadopago_sync_job
 
@@ -138,6 +138,33 @@ async def sync_now(
     return MercadoPagoSyncAccepted()
 
 
+@router.patch("/integrations/{member_user_id}/fund-role", response_model=MercadoPagoIntegrationRead)
+def update_fund_role(
+    home_group_id: int,
+    member_user_id: int,
+    payload: MercadoPagoFundRoleUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MercadoPagoIntegrationRead:
+    require_home_member(home_group_id, user, db)
+    _require_own_integration(member_user_id, user)
+    if payload.fund_role not in ("personal", "fondo_comun"):
+        raise HTTPException(status_code=400, detail="El rol debe ser personal o fondo_comun")
+    integration = db.scalar(
+        select(MercadoPagoIntegration).where(
+            MercadoPagoIntegration.home_group_id == home_group_id,
+            MercadoPagoIntegration.user_id == member_user_id,
+        )
+    )
+    if integration is None:
+        raise HTTPException(status_code=404, detail="Integracion Mercado Pago no conectada")
+    integration.fund_role = payload.fund_role
+    log_action(db, home_group_id, user.id, "mercadopago_fund_role", "mercadopago_integration", f"Rol del fondo: {payload.fund_role}", integration.id)
+    db.commit()
+    db.refresh(integration)
+    return _integration_read(member_user_id, integration)
+
+
 @router.delete("/integrations/{member_user_id}")
 def delete_integration(
     home_group_id: int,
@@ -174,6 +201,7 @@ def _integration_read(user_id: int, integration: MercadoPagoIntegration | None) 
         user_id=user_id,
         connected=True,
         enabled=integration.enabled,
+        fund_role=integration.fund_role,
         mp_user_id=integration.mp_user_id,
         mp_nickname=integration.mp_nickname,
         mp_site_id=integration.mp_site_id,

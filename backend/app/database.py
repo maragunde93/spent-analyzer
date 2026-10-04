@@ -70,6 +70,8 @@ def ensure_incremental_schema() -> None:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN mercadopago_collector_id VARCHAR(80)"))
             if "mercadopago_store_id" not in import_columns:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN mercadopago_store_id VARCHAR(80)"))
+            if "mercadopago_origin_id" not in import_columns:
+                connection.execute(text("ALTER TABLE import_lines ADD COLUMN mercadopago_origin_id VARCHAR(120)"))
             receipt_item_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(receipt_items)"))}
             if "status" not in receipt_item_columns:
                 connection.execute(text("ALTER TABLE receipt_items ADD COLUMN status VARCHAR(40) NOT NULL DEFAULT 'accepted'"))
@@ -138,6 +140,7 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS mercadopago_merchant_key VARCHAR(120)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS mercadopago_collector_id VARCHAR(80)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS mercadopago_store_id VARCHAR(80)"))
+            connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS mercadopago_origin_id VARCHAR(120)"))
             _ensure_postgres_mercadopago_runtime_schema(connection)
             connection.execute(text("ALTER TABLE receipt_items ADD COLUMN IF NOT EXISTS status VARCHAR(40) NOT NULL DEFAULT 'accepted'"))
             connection.execute(text("ALTER TABLE receipt_imports ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES categories(id)"))
@@ -200,6 +203,8 @@ def _ensure_sqlite_mercadopago_schema(connection) -> None:
         )
     )
     integration_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(mercadopago_integrations)"))}
+    if "fund_role" not in integration_columns:
+        connection.execute(text("ALTER TABLE mercadopago_integrations ADD COLUMN fund_role VARCHAR(24) NOT NULL DEFAULT 'personal'"))
     for column, definition in {
         "last_sync_started_at": "DATETIME",
         "last_sync_completed_at": "DATETIME",
@@ -238,6 +243,7 @@ def _ensure_sqlite_mercadopago_schema(connection) -> None:
 
 
 def _ensure_postgres_mercadopago_runtime_schema(connection) -> None:
+    connection.execute(text("ALTER TABLE mercadopago_integrations ADD COLUMN IF NOT EXISTS fund_role VARCHAR(24) NOT NULL DEFAULT 'personal'"))
     for column, definition in {
         "last_sync_started_at": "TIMESTAMP",
         "last_sync_completed_at": "TIMESTAMP",

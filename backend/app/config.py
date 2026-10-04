@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     mercadopago_sync_hour_argentina: int = 4
     mercadopago_sync_overlap_days: int = 3
     mercadopago_report_poll_interval_seconds: float = 10.0
-    mercadopago_report_poll_timeout_seconds: float = 180.0
+    mercadopago_report_poll_timeout_seconds: float = 600.0
     mercadopago_debug_http_enabled: bool = False
     mercadopago_debug_http_max_chars: int = 12000
 

@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.api import auth, cash, dashboard, expenses, fx, history, households, imports, mercadopago, receipts
+from app.api import auth, cash, dashboard, expenses, fund, fx, history, households, imports, mercadopago, receipts
 from app.config import get_settings, should_seed_development_data, validate_production_settings
 from app.database import Base, SessionLocal, engine, init_db
 from app.dev_seed import seed_development_data
@@ -38,6 +38,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard.router)
     app.include_router(imports.router)
     app.include_router(mercadopago.router)
+    app.include_router(fund.router)
     app.include_router(cash.router)
     app.include_router(fx.router)
     app.include_router(history.router)
@@ -93,6 +94,10 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     if settings.test_auth_enabled:
+        from app import test_support
+
+        app.include_router(test_support.router)
+
         @app.post("/test/reset")
         def reset_test_database() -> dict:
             Base.metadata.drop_all(bind=engine)
