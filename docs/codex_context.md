@@ -184,7 +184,7 @@ Durable behavior:
 - Validate a token through Mercado Libre identity before saving it. Never return or log the raw token; HTTP debug logs must redact `Authorization`.
 - The settlement report configuration must exist and include all required columns before requesting a report. Mercado Pago may return `404` when this prerequisite is missing.
 - Manual sync atomically claims the integration, returns `202 Accepted`, and runs report creation/polling/download/import in an in-process background task with independent short-lived DB sessions. The UI polls persisted lifecycle fields and keeps a global indicator visible across navigation.
-- A running sync blocks overlapping manual/scheduled sync, token replacement, and disconnect. Startup converts abandoned `running` states into an interrupted error. Do not solve proxy timeouts by making nginx wait for the 180-second Mercado Pago polling window.
+- A running sync blocks overlapping manual/scheduled sync, token replacement, and disconnect. Startup converts abandoned `running` states into an interrupted error. Report generation is polled asynchronously for up to 600 seconds by default; do not make nginx wait for that window.
 - Correlate polling by the report ID returned from creation. Only when no ID exists may exact begin/end timestamps be used; never choose an older report because it covers the requested range.
 - Manual incremental sync advances `last_sync_at`; explicit historical range sync does not advance that cursor.
 - Range sync requires both dates; the UI defaults both to the user's local current date.

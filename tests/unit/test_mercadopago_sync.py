@@ -1,11 +1,14 @@
 import asyncio
 import sys
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+
+import httpx
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -22,11 +25,15 @@ from app.api.expenses import delete_expense, update_expense
 from app.schemas import ExpenseUpdate
 from app.services.mercadopago import (
     MercadoPagoClient,
+    MercadoPagoError,
     MercadoPagoNotFoundError,
     MercadoPagoReport,
     MercadoPagoTemporaryError,
     _description_from_payment,
     _merchant_identity_from_payment,
+    _report_config_payload,
+    _report_matches_historical_range,
+    _stable_origin_from_row,
     claim_mercadopago_sync,
     execute_mercadopago_sync_job,
     parse_report_csv,
@@ -36,7 +43,7 @@ from app.services.mercadopago import (
 
 
 class FakeMercadoPagoClient:
-    def __init__(self, content: bytes, fail_download: bool = False, payments: dict[str, dict] | None = None):
+    def __init__(self, content: bytes, fail_download: bool = False, payments: dict[str, dict] | None = None, existing_reports: list[dict] | None = None):
         self.content = content
         self.fail_download = fail_download
         self.payments = payments or {}
@@ -46,6 +53,9 @@ class FakeMercadoPagoClient:
         self.ensure_config_calls = 0
         self.created_begin = None
         self.created_end = None
+        self.existing_reports = existing_reports or []
+        self.search_calls = 0
+        self.wait_created_response = None
 
     async def ensure_report_config(self, mp_user_id: str | None = None):
         self.ensure_config_calls += 1
@@ -58,7 +68,12 @@ class FakeMercadoPagoClient:
         return {"file_name": "settlement-report-test.csv"}
 
     async def wait_for_report(self, begin: datetime, end: datetime, created_response, poll_interval_seconds: float, timeout_seconds: float):
+        self.wait_created_response = created_response
         return MercadoPagoReport("settlement-report-test.csv", created_response)
+
+    async def search_reports(self):
+        self.search_calls += 1
+        return self.existing_reports
 
     async def download_report(self, file_name: str):
         self.download_calls += 1
@@ -140,6 +155,61 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(movements[3].amount, Decimal("-1200.00"))
         self.assertEqual(movements[4].ignored_reason, "Operacion financiada con tarjeta vinculada")
 
+    async def test_report_requests_payer_fields_and_uses_document_as_private_stable_origin(self):
+        columns = {item["key"] for item in _report_config_payload(None, "123")["columns"]}
+        self.assertTrue({"PAYER_NAME", "PAYER_ID_TYPE", "PAYER_ID_NUMBER", "PAY_BANK_TRANSFER_ID"}.issubset(columns))
+        row = {"PAYER_NAME": "Mica", "PAYER_ID_TYPE": "DNI", "PAYER_ID_NUMBER": "12345678"}
+        origin = _stable_origin_from_row(row)
+        self.assertTrue(origin.startswith("payer_document:dni:"))
+        self.assertNotIn("12345678", origin)
+        self.assertEqual(origin, _stable_origin_from_row(row))
+        self.assertNotEqual(origin, _stable_origin_from_row({**row, "PAYER_ID_NUMBER": "87654321"}))
+
+    async def test_debin_income_tries_payment_details_and_backfills_payer_on_resync(self):
+        content = (
+            "SOURCE_ID;PAYMENT_METHOD_TYPE;TRANSACTION_TYPE;TRANSACTION_AMOUNT;TRANSACTION_CURRENCY;TRANSACTION_DATE;REAL_AMOUNT;SALE_DETAIL\n"
+            "123456789;bank_transfer;SETTLEMENT;100000;ARS;2026-08-24T12:00:00-03:00;100000;Pago Debin\n"
+        ).encode("utf-8")
+        first_client = FakeMercadoPagoClient(content)
+        await sync_integration(self.db, self.integration, client=first_client, poll_interval_seconds=0, poll_timeout_seconds=1, now=datetime(2026, 8, 25, tzinfo=timezone.utc))
+        line = self.db.scalar(select(ImportLine).where(ImportLine.description == "Pago Debin"))
+        self.assertEqual(first_client.payment_calls, ["123456789"])
+        self.assertIsNone(line.mercadopago_origin_id)
+
+        payment = {"id": 123456789, "transaction_amount": 100000, "payer": {"first_name": "Micaela", "last_name": "Molto Espinola", "identification": {"type": "CUIL", "number": "27123456789"}}}
+        wrong_payment = {**payment, "transaction_amount": 50000}
+        await sync_integration(self.db, self.integration, client=FakeMercadoPagoClient(content, payments={"123456789": wrong_payment}), poll_interval_seconds=0, poll_timeout_seconds=1, now=datetime(2026, 8, 25, tzinfo=timezone.utc))
+        self.assertIsNone(line.mercadopago_origin_id)
+        second_client = FakeMercadoPagoClient(content, payments={"123456789": payment})
+        result = await sync_integration(self.db, self.integration, client=second_client, poll_interval_seconds=0, poll_timeout_seconds=1, now=datetime(2026, 8, 25, tzinfo=timezone.utc))
+        self.assertEqual(result.imported, 0)
+        self.assertEqual(json.loads(line.raw_text)["PAYER_NAME"], "Micaela Molto Espinola")
+        self.assertTrue(line.mercadopago_origin_id.startswith("payer_document:cuil:"))
+        self.assertNotIn("27123456789", line.mercadopago_origin_id)
+
+    async def test_report_config_update_preserves_notification_recipients(self):
+        payload = _report_config_payload(
+            {"file_name_prefix": "existing-report", "notification_email_list": ["owner@example.test"]},
+            "123",
+        )
+        self.assertEqual(payload["notification_email_list"], ["owner@example.test"])
+
+    async def test_common_wallet_defaults_new_purchases_to_shared_without_marking_transfers_shared(self):
+        self.integration.fund_role = "fondo_comun"
+        self.db.commit()
+        await sync_integration(
+            self.db, self.integration, client=FakeMercadoPagoClient(_csv_bytes()),
+            poll_interval_seconds=0, poll_timeout_seconds=1,
+            now=datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc),
+        )
+        expenses = list(self.db.scalars(select(Expense).where(Expense.source == ExpenseSource.mercadopago)))
+        purchases = [item for item in expenses if item.original_amount > 0 and "PEDIDOSYA" in item.description]
+        transfers = [item for item in expenses if item.original_amount == Decimal("15000")]
+        self.assertEqual(len(purchases), 1)
+        self.assertTrue(purchases[0].is_shared)
+        self.assertEqual(len(transfers), 1)
+        self.assertFalse(transfers[0].is_shared)
+
     async def test_sync_imports_supported_movements_maps_user_and_is_idempotent(self):
         now = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
         client = FakeMercadoPagoClient(_csv_bytes())
@@ -183,6 +253,22 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(list(self.db.scalars(select(Expense).where(Expense.source == ExpenseSource.mercadopago)))), 3)
         self.assertEqual(len(list(self.db.scalars(select(Earning)))), 1)
 
+    async def test_resync_backfills_payer_fields_on_existing_income_without_duplication(self):
+        now = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+        await sync_integration(self.db, self.integration, client=FakeMercadoPagoClient(_csv_bytes()), now=now)
+        earning = self.db.scalar(select(Earning))
+        line = self.db.get(ImportLine, earning.import_line_id)
+        self.assertNotIn("PAYER_NAME", json.loads(line.raw_text))
+
+        old_rows = _csv_bytes().decode("utf-8").splitlines()
+        updated_rows = [old_rows[0] + ";PAYER_NAME;PAYER_ID_TYPE;PAYER_ID_NUMBER"]
+        updated_rows += [row + (";Mica;DNI;12345678" if "SRC-003" in row else ";;;") for row in old_rows[1:]]
+        refreshed = await sync_integration(self.db, self.integration, client=FakeMercadoPagoClient(("\n".join(updated_rows) + "\n").encode()), now=now)
+        self.assertEqual(refreshed.duplicates, 5)
+        self.assertEqual(len(list(self.db.scalars(select(Earning)))), 1)
+        self.assertEqual(json.loads(line.raw_text)["PAYER_NAME"], "Mica")
+        self.assertTrue(line.mercadopago_origin_id.startswith("payer_document:dni:"))
+
     async def test_sync_does_not_advance_last_sync_at_when_download_fails(self):
         original_last_sync_at = self.integration.last_sync_at
 
@@ -222,6 +308,85 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.integration.last_sync_at, original_last_sync_at)
         self.assertEqual(client.created_begin.date(), date(2026, 8, 1))
         self.assertEqual(client.created_end.date(), date(2026, 8, 31))
+
+    async def test_historical_range_reuses_available_report_with_argentina_day_boundaries(self):
+        client = FakeMercadoPagoClient(_csv_bytes(), existing_reports=[{
+            "id": "report-uuid", "user_id": "123456", "status": "available",
+            "date_start": "2026-08-29T03:00:00Z", "date_end": "2026-09-29T02:59:59Z",
+            "files": [{"type": "json", "name": "old.json"}, {"type": "csv", "name": "old.csv"}],
+        }])
+
+        result = await sync_integration(
+            self.db, self.integration, client=client, poll_interval_seconds=0, poll_timeout_seconds=1,
+            now=datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc),
+            start_date=date(2026, 8, 29), end_date=date(2026, 9, 28), advance_cursor=False,
+        )
+
+        self.assertEqual(result.report_file_name, "old.csv")
+        self.assertEqual(client.create_calls, 0)
+        self.assertEqual(client.search_calls, 1)
+        self.assertEqual(client.download_calls, 1)
+
+    async def test_historical_range_resumes_matching_pending_report(self):
+        pending = {
+            "id": 103424685, "user_id": "123456", "status": "pending", "files": [],
+            "date_start": "2026-08-29T03:00:00Z", "date_end": "2026-09-29T02:59:59Z",
+        }
+        client = FakeMercadoPagoClient(_csv_bytes(), existing_reports=[pending])
+
+        await sync_integration(
+            self.db, self.integration, client=client, poll_interval_seconds=0, poll_timeout_seconds=1,
+            now=datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc),
+            start_date=date(2026, 8, 29), end_date=date(2026, 9, 28), advance_cursor=False,
+        )
+
+        self.assertEqual(client.create_calls, 0)
+        self.assertIs(client.wait_created_response, pending)
+
+    async def test_regenerate_bypasses_matching_historical_report(self):
+        client = FakeMercadoPagoClient(_csv_bytes(), existing_reports=[{
+            "id": 123, "status": "processed", "user_id": "123456",
+            "begin_date": "2026-08-29T00:00:00Z", "end_date": "2026-09-28T23:59:59Z",
+            "file_name": "old.csv",
+        }])
+
+        await sync_integration(
+            self.db, self.integration, client=client, poll_interval_seconds=0, poll_timeout_seconds=1,
+            now=datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc),
+            start_date=date(2026, 8, 29), end_date=date(2026, 9, 28),
+            advance_cursor=False, force_regenerate=True,
+        )
+
+        self.assertEqual(client.create_calls, 1)
+        self.assertEqual(client.search_calls, 0)
+
+    async def test_current_day_range_does_not_reuse_snapshot(self):
+        client = FakeMercadoPagoClient(_csv_bytes(), existing_reports=[{
+            "id": 123, "status": "processed", "user_id": "123456",
+            "begin_date": "2026-10-03T00:00:00Z", "end_date": "2026-10-04T12:00:00Z",
+            "file_name": "old.csv",
+        }])
+
+        await sync_integration(
+            self.db, self.integration, client=client, poll_interval_seconds=0, poll_timeout_seconds=1,
+            now=datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc),
+            start_date=date(2026, 10, 3), end_date=date(2026, 10, 4), advance_cursor=False,
+        )
+
+        self.assertEqual(client.create_calls, 1)
+        self.assertEqual(client.search_calls, 0)
+
+    async def test_historical_match_rejects_partial_or_early_generated_report(self):
+        begin = datetime(2026, 8, 29, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 9, 28, 23, 59, 59, tzinfo=timezone.utc)
+        report = {
+            "user_id": "123456", "date_start": "2026-08-29T03:00:00Z",
+            "date_end": "2026-09-29T02:59:59Z", "date_created": "2026-10-04T03:33:25Z",
+        }
+        self.assertTrue(_report_matches_historical_range(report, begin, end, "123456"))
+        self.assertFalse(_report_matches_historical_range({**report, "user_id": "other"}, begin, end, "123456"))
+        self.assertFalse(_report_matches_historical_range({**report, "date_start": "2026-08-29T06:00:00Z"}, begin, end, "123456"))
+        self.assertFalse(_report_matches_historical_range({**report, "date_created": "2026-09-28T23:00:00Z"}, begin, end, "123456"))
 
     async def test_sync_uses_merchant_learning_for_category(self):
         self.db.add(
@@ -456,6 +621,43 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 400)
         self.assertEqual(raised.exception.detail, "Para sincronizar un rango, completa las fechas Desde y Hasta")
 
+    async def test_api_rejects_regenerate_without_range(self):
+        with self.assertRaises(HTTPException) as raised:
+            await mercadopago_api.sync_now(
+                self.home.id, self.integration.user_id,
+                mercadopago_api.MercadoPagoSyncRequest(regenerate=True),
+                self.other_user, self.db,
+            )
+        self.assertEqual(raised.exception.status_code, 400)
+
+    async def test_api_passes_regenerate_to_background_sync(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        received = {}
+
+        async def fake_job(*args, **kwargs):
+            received.update(kwargs)
+            started.set()
+            await release.wait()
+
+        original_job = mercadopago_api.execute_mercadopago_sync_job
+        mercadopago_api.execute_mercadopago_sync_job = fake_job
+        try:
+            await mercadopago_api.sync_now(
+                self.home.id, self.integration.user_id,
+                mercadopago_api.MercadoPagoSyncRequest(
+                    start_date=date(2026, 8, 29), end_date=date(2026, 9, 28), regenerate=True,
+                ),
+                self.other_user, self.db,
+            )
+            await started.wait()
+            self.assertTrue(received["force_regenerate"])
+            self.assertFalse(received["advance_cursor"])
+        finally:
+            release.set()
+            await asyncio.sleep(0)
+            mercadopago_api.execute_mercadopago_sync_job = original_job
+
     async def test_api_rejects_managing_another_users_integration(self):
         with self.assertRaises(HTTPException) as raised:
             await mercadopago_api.sync_now(
@@ -561,6 +763,79 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(client._matching_report([older_covering, exact], begin, end, report_id="103211754"), exact)
         self.assertIsNone(client._matching_report([older_covering], begin, end))
         self.assertIs(client._matching_report([older_covering, exact], begin, end), exact)
+
+    async def test_report_wait_uses_task_status_when_list_has_no_filename(self):
+        client = MercadoPagoClient("APP_USR-secret")
+        begin = datetime(2026, 9, 16, 3, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 9, 18, 2, 59, 59, tzinfo=timezone.utc)
+        client.get_report_task = AsyncMock(side_effect=[
+            {"id": 103211754, "status": "pending"},
+            {"id": 103211754, "status": "processed", "file_name": "ready.csv"},
+        ])
+        client.list_reports = AsyncMock(side_effect=AssertionError("La lista no debe usarse si hay un ID de tarea"))
+        with patch("app.services.mercadopago.asyncio.sleep", new_callable=AsyncMock):
+            report = await client.wait_for_report(begin, end, {"id": 103211754}, poll_interval_seconds=0, timeout_seconds=1)
+
+        self.assertEqual(report.file_name, "ready.csv")
+        self.assertEqual(client.get_report_task.await_count, 2)
+        client.list_reports.assert_not_awaited()
+
+    async def test_report_wait_reads_csv_from_new_files_response_only_when_available(self):
+        client = MercadoPagoClient("APP_USR-secret")
+        begin = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 9, 29, 2, 59, 59, tzinfo=timezone.utc)
+        files = [
+            {"type": "json", "name": "report.json"},
+            {"type": "csv", "name": "report.csv"},
+        ]
+        client.get_report_task = AsyncMock(side_effect=[
+            {"id": "report-uuid", "status": "pending", "files": files},
+            {"id": "report-uuid", "status": "available", "files": files},
+        ])
+        with patch("app.services.mercadopago.asyncio.sleep", new_callable=AsyncMock):
+            report = await client.wait_for_report(begin, end, {"id": 103424685}, poll_interval_seconds=0, timeout_seconds=1)
+
+        self.assertEqual(report.file_name, "report.csv")
+        self.assertEqual(client.get_report_task.await_count, 2)
+        client.get_report_task.assert_awaited_with("103424685")
+
+    async def test_report_wait_resumes_uuid_report_from_search(self):
+        client = MercadoPagoClient("APP_USR-secret")
+        begin = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 9, 29, 2, 59, 59, tzinfo=timezone.utc)
+        client.search_reports = AsyncMock(side_effect=[
+            [{"id": "report-uuid", "status": "pending", "files": []}],
+            [{"id": "report-uuid", "status": "available", "files": [{"type": "csv", "name": "ready.csv"}]}],
+        ])
+        client.get_report_task = AsyncMock(side_effect=AssertionError("El UUID no es un ID numerico de tarea"))
+
+        with patch("app.services.mercadopago.asyncio.sleep", new_callable=AsyncMock):
+            report = await client.wait_for_report(begin, end, {"id": "report-uuid", "status": "pending"}, poll_interval_seconds=0, timeout_seconds=1)
+
+        self.assertEqual(report.file_name, "ready.csv")
+        self.assertEqual(client.search_reports.await_count, 2)
+        client.get_report_task.assert_not_awaited()
+
+    async def test_report_creation_does_not_accept_http_203(self):
+        client = MercadoPagoClient("APP_USR-secret")
+        begin = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 9, 29, 2, 59, 59, tzinfo=timezone.utc)
+        response = httpx.Response(203, json={"message": "Report could not be created"}, request=httpx.Request("POST", "https://api.mercadopago.com/v1/account/settlement_report"))
+
+        with patch("app.services.mercadopago.httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.request = AsyncMock(return_value=response)
+            with self.assertRaisesRegex(MercadoPagoError, "HTTP 203"):
+                await client.create_report(begin, end)
+
+
+    async def test_report_wait_stops_when_task_fails(self):
+        client = MercadoPagoClient("APP_USR-secret")
+        client.get_report_task = AsyncMock(return_value={"id": 103211754, "status": "failed"})
+        begin = datetime(2026, 9, 16, 3, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 9, 18, 2, 59, 59, tzinfo=timezone.utc)
+
+        with self.assertRaisesRegex(MercadoPagoError, "no pudo generar"):
+            await client.wait_for_report(begin, end, {"id": 103211754}, poll_interval_seconds=0, timeout_seconds=1)
 
     async def test_background_job_persists_success_counts(self):
         fake_client = FakeMercadoPagoClient(_csv_bytes())
@@ -735,6 +1010,25 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn({"key": "SALE_DETAIL"}, payload["columns"])
         self.assertIn({"key": "BUSINESS_UNIT"}, payload["columns"])
         self.assertIn({"key": "SUB_UNIT"}, payload["columns"])
+
+    async def test_client_reads_report_task_by_creation_id(self):
+        client = RecordingMercadoPagoClient()
+        await client.get_report_task("103211754")
+        self.assertEqual(client.calls[0][0], "GET")
+        self.assertEqual(client.calls[0][1], "https://api.mercadopago.com/v1/account/settlement_report/task/103211754")
+
+    async def test_report_search_paginates_existing_reports(self):
+        client = MercadoPagoClient("APP_USR-secret")
+        client._request_json = AsyncMock(side_effect=[
+            {"paging": {"total": 501}, "results": [{"id": index} for index in range(500)]},
+            {"paging": {"total": 501}, "results": [{"id": 500}]},
+        ])
+
+        reports = await client.search_reports()
+
+        self.assertEqual(len(reports), 501)
+        self.assertIn("limit=500&offset=0", client._request_json.await_args_list[0].args[1])
+        self.assertIn("limit=500&offset=500", client._request_json.await_args_list[1].args[1])
 
 
 class RecordingMercadoPagoClient(MercadoPagoClient):

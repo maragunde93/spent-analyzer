@@ -37,6 +37,7 @@ class MercadoPagoIntegrationRead(BaseModel):
     user_id: int
     connected: bool
     enabled: bool = False
+    fund_role: str = "personal"
     mp_user_id: str | None = None
     mp_nickname: str | None = None
     mp_site_id: str | None = None
@@ -59,9 +60,43 @@ class MercadoPagoTokenUpdate(BaseModel):
     enabled: bool = True
 
 
+class MercadoPagoFundRoleUpdate(BaseModel):
+    fund_role: str
+
+
+class FundShareInput(BaseModel):
+    user_id: int
+    percentage: Decimal = Field(ge=0, le=100)
+
+
+class FundConfigUpdate(BaseModel):
+    monthly_amount: Decimal = Field(gt=0)
+    shares: list[FundShareInput]
+
+
+class FundOpeningBalanceUpdate(BaseModel):
+    start_date: Date
+    amount: Decimal
+
+
+class FundManualMovementInput(BaseModel):
+    date: Date
+    from_user_id: int | None = None
+    to_user_id: int | None = None
+    amount: Decimal = Field(gt=0)
+    note: str | None = Field(default=None, max_length=240)
+
+
+class FundMpContributionUpdate(BaseModel):
+    classification: str
+    contributor_user_id: int | None = None
+    remember_origin: bool = False
+
+
 class MercadoPagoSyncRequest(BaseModel):
     start_date: Date | None = None
     end_date: Date | None = None
+    regenerate: bool = False
 
 
 class MercadoPagoSyncRead(BaseModel):

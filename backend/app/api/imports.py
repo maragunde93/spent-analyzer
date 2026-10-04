@@ -130,7 +130,13 @@ async def upload_bbva_account(
     batch.fx_rate_ars_per_usd = _fx_rate_for_import_date(db, batch.created_at.date() if batch.created_at else date.today())
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
+    fingerprint_occurrences: dict[str, int] = {}
     for line in parsed.lines:
+        occurrence = fingerprint_occurrences.get(line.fingerprint, 0) + 1
+        fingerprint_occurrences[line.fingerprint] = occurrence
+        # Equal bank movements can occur twice on one day. Preserve the legacy
+        # fingerprint for the first row and distinguish later occurrences.
+        unique_fingerprint = line.fingerprint if occurrence == 1 else f"{line.fingerprint}:{occurrence}"
         suggested_category_id, suggested_subcategory_id, suggested_recurring, suggested_shared = _suggest_import_line(
             db,
             home_group_id,
@@ -153,7 +159,7 @@ async def upload_bbva_account(
                 suggested_subcategory_id=suggested_subcategory_id,
                 suggested_recurring=suggested_recurring,
                 suggested_shared=suggested_shared,
-                fingerprint=f"{batch.id}:{line.fingerprint}",
+                fingerprint=f"{batch.id}:{unique_fingerprint}",
                 raw_text=line.raw_text,
             )
         )

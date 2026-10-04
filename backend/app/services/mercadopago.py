@@ -51,6 +51,10 @@ MERCADOPAGO_REPORT_COLUMNS = (
     "BUSINESS_UNIT",
     "SUB_UNIT",
     "SALE_DETAIL",
+    "PAYER_NAME",
+    "PAYER_ID_TYPE",
+    "PAYER_ID_NUMBER",
+    "PAY_BANK_TRANSFER_ID",
 )
 
 CARD_METHOD_TYPES = {"credit_card", "debit_card", "prepaid_card"}
@@ -58,6 +62,7 @@ TRANSFER_TOKENS = ("TRANSFER", "TRANSFERENCIA", "MONEY_TRANSFER", "PAYOUT", "PAY
 REFUND_TOKENS = ("REFUND", "DEVOLUCION", "DEVOLUCIÓN", "REIMBURSEMENT", "CHARGEBACK", "REINTEGRO")
 PURCHASE_TOKENS = ("PAYMENT", "SETTLEMENT", "COMPRA", "PAGO")
 logger = logging.getLogger(__name__)
+ARGENTINA_TZ = timezone(timedelta(hours=-3))
 
 
 class MercadoPagoError(RuntimeError):
@@ -69,6 +74,10 @@ class MercadoPagoTemporaryError(MercadoPagoError):
 
 
 class MercadoPagoNotFoundError(MercadoPagoError):
+    pass
+
+
+class MercadoPagoReportFileUnavailable(MercadoPagoTemporaryError):
     pass
 
 
@@ -97,6 +106,7 @@ class MercadoPagoMovement:
     merchant_key: str | None = None
     collector_id: str | None = None
     store_id: str | None = None
+    origin_id: str | None = None
     ignored_reason: str | None = None
     notes: str | None = None
 
@@ -199,7 +209,7 @@ class MercadoPagoClient:
                 "begin_date": _utc_iso(begin),
                 "end_date": _utc_iso(end),
             },
-            accepted_statuses={200, 202, 203},
+            accepted_statuses={200, 202},
         )
 
     async def list_reports(self) -> list[dict[str, Any]]:
@@ -208,24 +218,60 @@ class MercadoPagoClient:
             raise MercadoPagoError("Mercado Pago devolvio un listado de reportes inesperado")
         return data
 
+    async def search_reports(self) -> list[dict[str, Any]]:
+        reports: list[dict[str, Any]] = []
+        limit = 500
+        for offset in range(0, 10000, limit):
+            data = await self._request_json(
+                "GET",
+                f"{self.api_base_url}/v1/account/settlement_report/search?limit={limit}&offset={offset}",
+            )
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                raise MercadoPagoError("Mercado Pago devolvio una busqueda de reportes inesperada")
+            page = [item for item in data["results"] if isinstance(item, dict)]
+            reports.extend(page)
+            paging = data.get("paging") or {}
+            total = paging.get("total") if isinstance(paging, dict) else None
+            if len(data["results"]) < limit or (isinstance(total, int) and offset + limit >= total):
+                break
+        return reports
+
+    async def get_report_task(self, task_id: str) -> dict[str, Any]:
+        data = await self._request_json("GET", f"{self.api_base_url}/v1/account/settlement_report/task/{task_id}")
+        if not isinstance(data, dict):
+            raise MercadoPagoError("Mercado Pago devolvio un estado de reporte inesperado")
+        return data
+
     async def wait_for_report(
         self,
         begin: datetime,
         end: datetime,
         created_response: dict[str, Any] | None = None,
         poll_interval_seconds: float = 10.0,
-        timeout_seconds: float = 180.0,
+        timeout_seconds: float = 600.0,
     ) -> MercadoPagoReport:
-        direct_file = _file_name_from_report(created_response or {})
+        direct_file = _file_name_from_report(created_response or {}) if _report_is_ready(created_response or {}) else None
         if direct_file:
             return MercadoPagoReport(file_name=direct_file, raw=created_response or {})
 
         report_id = str((created_response or {}).get("id") or "").strip() or None
         deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
         while True:
-            report = self._matching_report(await self.list_reports(), begin, end, report_id=report_id)
+            if report_id:
+                if report_id.isdigit():
+                    try:
+                        report = await self.get_report_task(report_id)
+                    except MercadoPagoNotFoundError:
+                        report = self._matching_report(await self.list_reports(), begin, end, report_id=report_id)
+                else:
+                    report = next((item for item in await self.search_reports() if str(item.get("id") or "") == report_id), None)
+            else:
+                report = self._matching_report(await self.list_reports(), begin, end)
             if report is not None:
-                file_name = _file_name_from_report(report)
+                status = str(report.get("status") or "").lower()
+                if status in {"failed", "error"}:
+                    raise MercadoPagoError("Mercado Pago no pudo generar el reporte")
+                file_name = _file_name_from_report(report) if _report_is_ready(report) else None
                 if file_name:
                     return MercadoPagoReport(file_name=file_name, raw=report)
             if datetime.now(timezone.utc) >= deadline:
@@ -244,7 +290,7 @@ class MercadoPagoClient:
         if response.status_code == 401:
             raise MercadoPagoError("Token de Mercado Pago invalido")
         if response.status_code == 404:
-            raise MercadoPagoTemporaryError("El archivo de reporte todavia no esta disponible")
+            raise MercadoPagoReportFileUnavailable("El archivo de reporte todavia no esta disponible")
         if response.status_code >= 500:
             raise MercadoPagoTemporaryError("Mercado Pago devolvio un error temporal")
         if response.status_code >= 400:
@@ -352,16 +398,30 @@ async def enrich_movements(client: MercadoPagoClient, movements: list[MercadoPag
         merchant_key = None
         collector_id = None
         store_id = None
+        origin_id = movement.origin_id
+        enriched_raw = dict(movement.raw)
         for payment_id in payment_ids:
             if payment_id not in payment_cache:
                 payment_cache[payment_id] = await client.get_payment(payment_id)
             payment = payment_cache[payment_id]
+            if movement.kind == ImportLineKind.income and not _payment_matches_income(payment, payment_id, movement.amount):
+                continue
+            if movement.kind == ImportLineKind.income and payment:
+                for key, value in _payer_fields_from_payment(payment).items():
+                    if not enriched_raw.get(key):
+                        enriched_raw[key] = value
             candidate_key, candidate_collector, candidate_store = _merchant_identity_from_payment(payment)
-            description = _description_from_payment(payment, movement.raw) or description
+            if movement.kind != ImportLineKind.income:
+                description = _description_from_payment(payment, movement.raw) or description
             merchant_key = candidate_key or merchant_key
             collector_id = candidate_collector or collector_id
             store_id = candidate_store or store_id
-            if description or merchant_key:
+            origin_id = origin_id or _stable_origin_from_row(enriched_raw)
+            if movement.kind != ImportLineKind.income:
+                origin_id = origin_id or _payment_origin_id(payment)
+            if (movement.kind == ImportLineKind.income and (enriched_raw.get("PAYER_NAME") or origin_id)) or (
+                movement.kind != ImportLineKind.income and (description or merchant_key)
+            ):
                 break
         enriched.append(
             replace(
@@ -370,6 +430,8 @@ async def enrich_movements(client: MercadoPagoClient, movements: list[MercadoPag
                 merchant_key=merchant_key,
                 collector_id=collector_id,
                 store_id=store_id,
+                origin_id=origin_id,
+                raw=enriched_raw,
             )
         )
     return enriched
@@ -387,6 +449,35 @@ def _merchant_identity_from_payment(payment: dict[str, Any] | None) -> tuple[str
     return None, None, None
 
 
+def _payment_origin_id(payment: dict[str, Any] | None) -> str | None:
+    if not payment:
+        return None
+    payer_id = _text_path(payment, "payer", "id")
+    return f"payer:{payer_id}" if payer_id else None
+
+
+def _payer_fields_from_payment(payment: dict[str, Any]) -> dict[str, str]:
+    first_name = _text_path(payment, "payer", "first_name")
+    last_name = _text_path(payment, "payer", "last_name")
+    name = " ".join(part for part in (first_name, last_name) if part)
+    fields = {}
+    if name:
+        fields["PAYER_NAME"] = name
+    document_type = _text_path(payment, "payer", "identification", "type")
+    document_number = _text_path(payment, "payer", "identification", "number")
+    if document_type and document_number:
+        fields["PAYER_ID_TYPE"] = document_type
+        fields["PAYER_ID_NUMBER"] = document_number
+    return fields
+
+
+def _payment_matches_income(payment: dict[str, Any] | None, payment_id: str, amount: Decimal) -> bool:
+    if not payment or _text_path(payment, "id") != payment_id:
+        return False
+    payment_amount = _parse_decimal(_text_path(payment, "transaction_amount"))
+    return payment_amount is not None and payment_amount == amount
+
+
 async def sync_integration(
     db: Session,
     integration: MercadoPagoIntegration,
@@ -394,11 +485,12 @@ async def sync_integration(
     client: MercadoPagoClient,
     overlap_days: int = 3,
     poll_interval_seconds: float = 10.0,
-    poll_timeout_seconds: float = 180.0,
+    poll_timeout_seconds: float = 600.0,
     now: datetime | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
     advance_cursor: bool = True,
+    force_regenerate: bool = False,
 ) -> MercadoPagoSyncResult:
     sync_started_at = now or datetime.utcnow()
     begin, end = (
@@ -418,6 +510,7 @@ async def sync_integration(
         end,
         poll_interval_seconds=poll_interval_seconds,
         poll_timeout_seconds=poll_timeout_seconds,
+        reuse_existing=_can_reuse_historical_report(start_date, end_date, sync_started_at) and not force_regenerate,
     )
     result = import_movements(db, integration, fetched.movements, fetched.report.file_name)
     result = MercadoPagoSyncResult(
@@ -450,8 +543,55 @@ async def fetch_mercadopago_report(
     *,
     poll_interval_seconds: float,
     poll_timeout_seconds: float,
+    reuse_existing: bool = False,
 ) -> MercadoPagoFetchedReport:
     await client.ensure_report_config(mp_user_id)
+    if reuse_existing:
+        try:
+            existing = await client.search_reports()
+        except MercadoPagoNotFoundError:
+            existing = await client.list_reports()
+        matching = sorted(
+            (item for item in existing if _report_matches_historical_range(item, begin, end, mp_user_id)),
+            key=lambda item: str(item.get("date_created") or item.get("generation_date") or ""),
+            reverse=True,
+        )
+        for item in matching:
+            if not _report_is_ready(item):
+                continue
+            report = item
+            if not _file_name_from_report(report) and report.get("id"):
+                try:
+                    report = await client.get_report_task(str(report["id"]))
+                except MercadoPagoNotFoundError:
+                    continue
+            file_name = _file_name_from_report(report) if _report_is_ready(report) else None
+            if not file_name:
+                continue
+            try:
+                content = await client.download_report(file_name)
+            except MercadoPagoReportFileUnavailable:
+                continue
+            if validate_required_columns(content):
+                logger.info("Se omite reporte Mercado Pago existente sin columnas requeridas: %s", file_name)
+                continue
+            logger.info("Se reutiliza reporte Mercado Pago existente: %s", file_name)
+            return MercadoPagoFetchedReport(
+                report=MercadoPagoReport(file_name=file_name, raw=report),
+                movements=await enrich_movements(client, parse_report_csv(content)),
+            )
+        pending = next((item for item in matching if str(item.get("status") or "").lower() in {"pending", "processing"} and item.get("id")), None)
+        if pending is not None:
+            report = await client.wait_for_report(
+                begin, end, pending,
+                poll_interval_seconds=poll_interval_seconds,
+                timeout_seconds=poll_timeout_seconds,
+            )
+            content = await client.download_report(report.file_name)
+            if not validate_required_columns(content):
+                logger.info("Se reutiliza tarea Mercado Pago existente: %s", pending["id"])
+                return MercadoPagoFetchedReport(report=report, movements=await enrich_movements(client, parse_report_csv(content)))
+            logger.info("Se omite tarea Mercado Pago existente sin columnas requeridas: %s", pending["id"])
     created = await client.create_report(begin, end)
     report = await client.wait_for_report(
         begin,
@@ -519,6 +659,7 @@ async def execute_mercadopago_sync_job(
     start_date: date | None = None,
     end_date: date | None = None,
     advance_cursor: bool = True,
+    force_regenerate: bool = False,
     debug_http: bool = False,
     debug_http_max_chars: int = 12000,
 ) -> None:
@@ -557,6 +698,7 @@ async def execute_mercadopago_sync_job(
             end,
             poll_interval_seconds=poll_interval_seconds,
             poll_timeout_seconds=poll_timeout_seconds,
+            reuse_existing=_can_reuse_historical_report(start_date, end_date, sync_started_at) and not force_regenerate,
         )
         with session_factory() as db:
             integration = db.get(MercadoPagoIntegration, integration_id)
@@ -632,6 +774,10 @@ def import_movements(
             category_id, subcategory_id, recurring = rule.category_id, rule.subcategory_id, rule.is_recurring
         if rule and rule.has_shared_override:
             shared = rule.is_shared
+        elif integration.fund_role == "fondo_comun" and movement.kind in (ImportLineKind.purchase, ImportLineKind.reimbursement):
+            learned = find_learned_suggestion(db, integration.home_group_id, description)
+            if not learned or not learned.has_shared_override:
+                shared = True
         line = ImportLine(
             import_batch_id=batch.id,
             home_group_id=integration.home_group_id,
@@ -653,6 +799,7 @@ def import_movements(
             mercadopago_merchant_key=movement.merchant_key,
             mercadopago_collector_id=movement.collector_id,
             mercadopago_store_id=movement.store_id,
+            mercadopago_origin_id=movement.origin_id,
         )
         db.add(line)
         db.flush()
@@ -757,7 +904,23 @@ def _movement_from_row(row: dict[str, str]) -> MercadoPagoMovement | None:
         raw=row,
         ignored_reason=ignored_reason,
         notes=None,
+        origin_id=_stable_origin_from_row(row),
     )
+
+
+def _stable_origin_from_row(row: dict[str, str]) -> str | None:
+    document = _first(row, "PAYER_ID_NUMBER")
+    document_type = _first(row, "PAYER_ID_TYPE").upper()
+    if document and document_type:
+        # Reuse a stable reconciliation key without exposing a document number
+        # in the fund UI or its learned-origin rules.
+        digest = hashlib.sha256(f"{document_type}:{document}".encode("utf-8")).hexdigest()[:24]
+        return f"payer_document:{document_type.lower()}:{digest}"
+    for key in ("PAYER_ID", "SENDER_ID", "COUNTERPART_ID", "ORIGIN_ID"):
+        value = _first(row, key)
+        if value:
+            return f"{key.lower()}:{value}"[:120]
+    return None
 
 
 def _create_expense(db: Session, integration: MercadoPagoIntegration, line: ImportLine) -> None:
@@ -827,6 +990,18 @@ def _backfill_mercadopago_identity(line: ImportLine, movement: MercadoPagoMoveme
         line.mercadopago_collector_id = movement.collector_id
     if not line.mercadopago_store_id and movement.store_id:
         line.mercadopago_store_id = movement.store_id
+    if not line.mercadopago_origin_id and movement.origin_id:
+        line.mercadopago_origin_id = movement.origin_id
+    try:
+        previous_raw = json.loads(line.raw_text) if line.raw_text else {}
+    except (TypeError, ValueError):
+        previous_raw = {}
+    if not isinstance(previous_raw, dict):
+        previous_raw = {}
+    for field in ("PAYER_NAME", "PAYER_ID_TYPE", "PAYER_ID_NUMBER", "PAY_BANK_TRANSFER_ID", "PAYMENT_METHOD_TYPE"):
+        if not previous_raw.get(field) and movement.raw.get(field):
+            previous_raw[field] = movement.raw[field]
+    line.raw_text = json.dumps(previous_raw, ensure_ascii=True, sort_keys=True)
 
 
 def _should_reimport_existing_line(db: Session, line: ImportLine, movement: MercadoPagoMovement) -> bool:
@@ -920,11 +1095,14 @@ def _payment_lookup_ids(row: dict[str, str]) -> list[str]:
     transaction_type = _first(row, "TRANSACTION_TYPE", "MOVEMENT_TYPE", "TYPE").upper()
     amount = _parse_decimal(_first(row, "REAL_AMOUNT", "SETTLEMENT_NET_AMOUNT", "TRANSACTION_AMOUNT"))
     is_payment_like = _contains_any(transaction_type, PURCHASE_TOKENS) or transaction_type == "SETTLEMENT"
-    if not is_payment_like or amount is None or amount >= 0:
+    is_incoming_transfer = amount is not None and amount > 0 and _first(row, "PAYMENT_METHOD_TYPE", "PAYMENT_METHOD").lower() == "bank_transfer"
+    if is_incoming_transfer and _first(row, "PAYER_NAME") and _stable_origin_from_row(row):
+        return []
+    if not is_incoming_transfer and (not is_payment_like or amount is None or amount >= 0):
         return []
 
     lookup_ids: list[str] = []
-    for key in ("SOURCE_ID", "PAYMENT_ID", "ORDER_ID"):
+    for key in (("SOURCE_ID", "PAYMENT_ID") if is_incoming_transfer else ("SOURCE_ID", "PAYMENT_ID", "ORDER_ID")):
         value = _first(row, key)
         if value and value.isdigit() and value not in lookup_ids:
             lookup_ids.append(value)
@@ -1096,7 +1274,64 @@ def _contains_any(value: str, tokens: tuple[str, ...]) -> bool:
 
 def _file_name_from_report(report: dict[str, Any]) -> str | None:
     value = report.get("file_name") or report.get("filename")
-    return str(value) if value else None
+    if value:
+        return str(value)
+    files = report.get("files")
+    if not isinstance(files, list):
+        return None
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        file_type = str(item.get("type") or "").lower()
+        if name and (file_type in {"csv", "text/csv"} or str(name).lower().endswith(".csv")):
+            return str(name)
+    return None
+
+
+def _report_is_ready(report: dict[str, Any]) -> bool:
+    status = str(report.get("status") or "").lower()
+    return status in {"", "processed", "available"}
+
+
+def _can_reuse_historical_report(start_date: date | None, end_date: date | None, now: datetime) -> bool:
+    if start_date is None or end_date is None:
+        return False
+    now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+    return end_date < now_utc.astimezone(ARGENTINA_TZ).date()
+
+
+def _report_matches_historical_range(report: dict[str, Any], begin: datetime, end: datetime, mp_user_id: str | None) -> bool:
+    report_user_id = report.get("user_id")
+    if mp_user_id and report_user_id is not None and str(report_user_id) != str(mp_user_id):
+        return False
+    origin_data = (report.get("origin") or {}).get("data") if isinstance(report.get("origin"), dict) else None
+    origin_data = origin_data if isinstance(origin_data, dict) else {}
+    report_begin = _parse_report_date(report.get("begin_date") or report.get("date_start") or origin_data.get("date_start"))
+    report_end = _parse_report_date(report.get("end_date") or report.get("date_end") or origin_data.get("date_end"))
+    if report_begin is None or report_end is None:
+        return False
+    report_begin = report_begin.replace(tzinfo=timezone.utc) if report_begin.tzinfo is None else report_begin.astimezone(timezone.utc)
+    report_end = report_end.replace(tzinfo=timezone.utc) if report_end.tzinfo is None else report_end.astimezone(timezone.utc)
+    created_at = _parse_report_date(report.get("date_created") or report.get("generation_date"))
+    if created_at is not None:
+        created_at = created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at.astimezone(timezone.utc)
+        if created_at < report_end:
+            return False
+    begin_utc = begin.replace(tzinfo=timezone.utc) if begin.tzinfo is None else begin.astimezone(timezone.utc)
+    end_utc = end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end.astimezone(timezone.utc)
+    if abs((report_begin - begin_utc).total_seconds()) <= 1 and abs((report_end - end_utc).total_seconds()) <= 1:
+        return True
+    local_begin = report_begin.astimezone(ARGENTINA_TZ)
+    local_end = report_end.astimezone(ARGENTINA_TZ)
+    return (
+        local_begin.date() == begin_utc.date()
+        and local_end.date() == end_utc.date()
+        and local_begin.hour == local_begin.minute == local_begin.second == 0
+        and local_end.hour == 23
+        and local_end.minute == 59
+        and local_end.second == 59
+    )
 
 
 def _sync_window(last_sync_at: datetime | None, overlap_days: int, now: datetime) -> tuple[datetime, datetime]:
@@ -1130,7 +1365,7 @@ def _report_config_payload(existing: dict[str, Any] | None, mp_user_id: str | No
     frequency = (existing or {}).get("frequency")
     if not isinstance(frequency, dict):
         frequency = {"hour": 0, "type": "monthly", "value": 1}
-    return {
+    payload = {
         "file_name_prefix": prefix,
         "show_fee_prevision": bool((existing or {}).get("show_fee_prevision", False)),
         "show_chargeback_cancel": bool((existing or {}).get("show_chargeback_cancel", True)),
@@ -1144,6 +1379,9 @@ def _report_config_payload(existing: dict[str, Any] | None, mp_user_id: str | No
         "frequency": frequency,
         "columns": [{"key": key} for key in MERCADOPAGO_REPORT_COLUMNS],
     }
+    if existing is not None and isinstance(existing.get("notification_email_list"), list):
+        payload["notification_email_list"] = existing["notification_email_list"]
+    return payload
 
 
 def _report_config_needs_update(existing: dict[str, Any]) -> bool:

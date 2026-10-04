@@ -9,7 +9,7 @@ from app.auth import get_current_user, require_home_member
 from app.config import get_settings
 from app.database import SessionLocal, get_db
 from app.models import MercadoPagoIntegration, User
-from app.schemas import MercadoPagoIntegrationRead, MercadoPagoSyncAccepted, MercadoPagoSyncRequest, MercadoPagoTokenUpdate
+from app.schemas import MercadoPagoFundRoleUpdate, MercadoPagoIntegrationRead, MercadoPagoSyncAccepted, MercadoPagoSyncRequest, MercadoPagoTokenUpdate
 from app.services.audit import log_action
 from app.services.mercadopago import MercadoPagoClient, MercadoPagoError, claim_mercadopago_sync, execute_mercadopago_sync_job
 
@@ -113,6 +113,8 @@ async def sync_now(
         raise HTTPException(status_code=404, detail="Integracion Mercado Pago no conectada")
     if payload and bool(payload.start_date) != bool(payload.end_date):
         raise HTTPException(status_code=400, detail="Para sincronizar un rango, completa las fechas Desde y Hasta")
+    if payload and payload.regenerate and not (payload.start_date and payload.end_date):
+        raise HTTPException(status_code=400, detail="Para regenerar un reporte, completa las fechas Desde y Hasta")
     settings = get_settings()
     if not claim_mercadopago_sync(db, integration.id):
         raise HTTPException(status_code=409, detail="Hay una sincronizacion de Mercado Pago en curso")
@@ -129,6 +131,7 @@ async def sync_now(
             start_date=payload.start_date if payload else None,
             end_date=payload.end_date if payload else None,
             advance_cursor=not custom_range,
+            force_regenerate=payload.regenerate if payload else False,
             debug_http=settings.mercadopago_debug_http_enabled,
             debug_http_max_chars=settings.mercadopago_debug_http_max_chars,
         )
@@ -136,6 +139,33 @@ async def sync_now(
     _sync_tasks.add(task)
     task.add_done_callback(_sync_tasks.discard)
     return MercadoPagoSyncAccepted()
+
+
+@router.patch("/integrations/{member_user_id}/fund-role", response_model=MercadoPagoIntegrationRead)
+def update_fund_role(
+    home_group_id: int,
+    member_user_id: int,
+    payload: MercadoPagoFundRoleUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MercadoPagoIntegrationRead:
+    require_home_member(home_group_id, user, db)
+    _require_own_integration(member_user_id, user)
+    if payload.fund_role not in ("personal", "fondo_comun"):
+        raise HTTPException(status_code=400, detail="El rol debe ser personal o fondo_comun")
+    integration = db.scalar(
+        select(MercadoPagoIntegration).where(
+            MercadoPagoIntegration.home_group_id == home_group_id,
+            MercadoPagoIntegration.user_id == member_user_id,
+        )
+    )
+    if integration is None:
+        raise HTTPException(status_code=404, detail="Integracion Mercado Pago no conectada")
+    integration.fund_role = payload.fund_role
+    log_action(db, home_group_id, user.id, "mercadopago_fund_role", "mercadopago_integration", f"Rol del fondo: {payload.fund_role}", integration.id)
+    db.commit()
+    db.refresh(integration)
+    return _integration_read(member_user_id, integration)
 
 
 @router.delete("/integrations/{member_user_id}")
@@ -174,6 +204,7 @@ def _integration_read(user_id: int, integration: MercadoPagoIntegration | None) 
         user_id=user_id,
         connected=True,
         enabled=integration.enabled,
+        fund_role=integration.fund_role,
         mp_user_id=integration.mp_user_id,
         mp_nickname=integration.mp_nickname,
         mp_site_id=integration.mp_site_id,

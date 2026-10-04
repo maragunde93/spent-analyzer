@@ -34,6 +34,7 @@ export type MercadoPagoIntegration = {
   user_id: number;
   connected: boolean;
   enabled: boolean;
+  fund_role: "personal" | "fondo_comun";
   mp_user_id: string | null;
   mp_nickname: string | null;
   mp_site_id: string | null;
@@ -49,6 +50,105 @@ export type MercadoPagoIntegration = {
   last_sync_ignored: number | null;
   last_sync_duplicates: number | null;
   updated_at: string | null;
+};
+
+export type FundMpIncome = {
+  assignment_id: number;
+  earning_id: number;
+  date: string;
+  description: string;
+  amount_ars: string;
+  classification: "pending" | "contribution" | "excluded";
+  contributor_user_id: number | null;
+  contributor_name: string | null;
+  stable_origin_id: string | null;
+  payer_name: string | null;
+  payer_document_suffix: string | null;
+  payment_method_type: string | null;
+  can_remember_origin: boolean;
+  integration_id: number;
+  account_user_id: number | null;
+  account_name: string | null;
+  assignment_source: "manual" | "rule" | "payer_name" | null;
+  legacy_refund: boolean;
+};
+
+export type FundMpPersonalOutflow = {
+  expense_id: number;
+  date: string;
+  description: string;
+  amount_ars: string;
+  account_user_id: number;
+  account_name: string | null;
+};
+
+export type FundMpActivity = {
+  incomes: FundMpIncome[];
+  personal_outflows: FundMpPersonalOutflow[];
+};
+
+export type FundSummary = {
+  period: string;
+  activated: boolean;
+  status: "abierto" | "pendiente_aprobacion" | "cerrado" | "desactualizado";
+  members?: Array<{ user_id: number; display_name: string }>;
+  config?: {
+    source_period: string;
+    inherited: boolean;
+    monthly_amount: string;
+    shares: Array<{ user_id: number; percentage: string }>;
+  };
+  opening_balance?: { start_date: string; amount: string } | null;
+  totals?: {
+    configured_fund: string;
+    shared_expenses: string;
+    financing_base: string;
+    surplus_or_excess: string;
+    agreed_opening_balance: string;
+    agreed_balance: string;
+    verified_balance: string;
+    difference: string;
+    personal_outflows: string;
+    personal_to_repay: string;
+  };
+  positions?: Array<{
+    user_id: number;
+    display_name: string;
+    percentage: string;
+    quota: string;
+    direct_paid: string;
+    contributed: string;
+    personal_outflow: string;
+    personal_repaid: string;
+    personal_to_repay: string;
+    economic_contribution: string;
+    outstanding: string;
+    to_receive: string;
+  }>;
+  plan?: Array<{
+    from_user_id: number;
+    from_name: string;
+    to_kind: "person" | "fund";
+    to_user_id: number | null;
+    to_name: string;
+    amount: string;
+    reason?: "personal_mp_outflow";
+  }>;
+  approvals?: Array<{ user_id: number; display_name: string; approved: boolean; approved_at: string | null }>;
+  alerts: string[];
+  movements?: Array<{ id: number | string; kind: string; date: string; label: string; amount: string; note?: string | null; from_user_id?: number | null; to_user_id?: number | null; editable: boolean }>;
+  mp_contributions: FundMpIncome[];
+  mp_personal_outflows?: FundMpPersonalOutflow[];
+  mp_integrations: Array<{ id: number; user_id: number; display_name: string | null; fund_role: "personal" | "fondo_comun"; nickname: string | null; enabled: boolean }>;
+};
+
+export type FundSeriesRow = {
+  period: string;
+  configured_fund: string;
+  shared_expenses: string;
+  surplus_or_excess: string;
+  agreed_balance: string;
+  verified_balance: string;
 };
 
 export type MercadoPagoSyncAccepted = {

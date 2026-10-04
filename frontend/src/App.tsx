@@ -7,6 +7,7 @@ import {
   CalendarClock,
   ChevronDown,
   ChevronRight,
+  CircleHelp,
   CircleDollarSign,
   Copy,
   ClipboardList,
@@ -29,10 +30,11 @@ import {
   Wrench,
   X
 } from "lucide-react";
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Customized, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Customized, LabelList, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, apiFallbacksEnabled } from "./api";
+import { ImportCoverageTable } from "./ImportCoverageTable";
 import { categories as fallbackCategories, users as fallbackUsers } from "./mockData";
-import type { Category, Currency, DashboardSummary, Expense, ExpenseSource, ImportBatch, ImportLine, MercadoPagoIntegration, ReceiptImport, ReceiptItem, SharedScope, User } from "./types";
+import type { Category, Currency, DashboardSummary, Expense, ExpenseSource, FundSummary, ImportBatch, ImportLine, MercadoPagoIntegration, ReceiptImport, ReceiptItem, SharedScope, User } from "./types";
 
 function money(value: string | number, currency = "ARS") {
   return new Intl.NumberFormat("es-AR", {
@@ -45,6 +47,22 @@ function money(value: string | number, currency = "ARS") {
 
 function numberFormat(value: string | number) {
   return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(Number(value));
+}
+
+function economicNumber(value: string | number) {
+  return new Intl.NumberFormat("es-AR", { maximumFractionDigits: 0 }).format(Math.round(Number(value) || 0));
+}
+
+function integerValue(value: string | number) {
+  if (value === "") return "";
+  return String(Math.round(Number(value) || 0));
+}
+
+function digitsOnly(value: string, max?: number) {
+  const digits = value.replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+  if (!digits) return "";
+  const number = Number(digits);
+  return String(max === undefined ? number : Math.min(max, number));
 }
 
 function fxSourceLabel(source?: string) {
@@ -410,53 +428,6 @@ function sortCategoryAverageRows(rows: CategoryAverageRow[], sort: AverageSort) 
   });
 }
 
-function importSourceLabel(batch: Pick<ImportBatch, "source_type" | "filename">) {
-  const filename = batch.filename.toLowerCase();
-  if (batch.source_type === "bbva_account_xls") return "Statement cuenta";
-  if (filename.includes("master")) return "Statement tarjeta master";
-  return "Statement tarjeta visa";
-}
-
-type ImportCoverageCell = { status: "Pendiente" | "Procesado"; fxRate: string | null };
-
-function buildImportCoverage(imports: ImportBatch[], users: User[]) {
-  const rows = new Map<string, { key: string; source: string; uploadedByUserId: number; paidByUserId: number | null; months: Record<string, ImportCoverageCell> }>();
-  const years = new Set<number>();
-  const orderedImports = [...imports].sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? "") || a.id - b.id);
-  for (const batch of orderedImports) {
-    if (batch.lines.length && batch.lines.every((line) => line.duplicate_status === "already_committed" || line.status === "duplicate")) {
-      continue;
-    }
-    const source = importSourceLabel(batch);
-    const periods = new Set(
-      batch.source_type === "bbva_account_xls"
-        ? batch.lines.length ? batch.lines.map((line) => line.date.slice(0, 7)) : batch.created_at ? [batch.created_at.slice(0, 7)] : []
-        : batch.statement_period ? [batch.statement_period] : batch.created_at ? [batch.created_at.slice(0, 7)] : []
-    );
-    const isProcessed = batch.status === "committed" || batch.lines.some((line) => line.status === "committed" || line.status === "ignored");
-    const paidByIds = batch.paid_by_user_ids.length ? batch.paid_by_user_ids : [null];
-    for (const paidByUserId of paidByIds) {
-      const key = `${source}:${batch.statement_account ?? ""}:${paidByUserId ?? "pending"}`;
-      if (!rows.has(key)) rows.set(key, { key, source, uploadedByUserId: batch.uploaded_by_user_id, paidByUserId, months: {} });
-      const row = rows.get(key)!;
-      for (const period of periods) {
-        const year = Number(period.slice(0, 4));
-        if (year) years.add(year);
-        const status = isProcessed ? "Procesado" : "Pendiente";
-        const current = row.months[period];
-        if (!current || (current.status === "Pendiente" && status === "Procesado")) {
-          row.months[period] = { status, fxRate: batch.fx_rate_ars_per_usd };
-        }
-      }
-    }
-  }
-  const userOrder = new Map(users.map((user, index) => [user.id, index]));
-  return {
-    years: Array.from(years).sort((a, b) => b - a),
-    rows: Array.from(rows.values()).sort((a, b) => a.source.localeCompare(b.source) || (userOrder.get(a.uploadedByUserId) ?? 999) - (userOrder.get(b.uploadedByUserId) ?? 999) || (userOrder.get(a.paidByUserId ?? -1) ?? 999) - (userOrder.get(b.paidByUserId ?? -1) ?? 999))
-  };
-}
-
 function importTotals(lines: ImportLine[], selected: number[], sourceType?: string, reimbursementByLine: Record<number, boolean> = {}) {
   const totals = {
     total: {} as Record<string, number>,
@@ -732,6 +703,7 @@ export function App() {
           <NavButton active={section === "expenses"} icon={<ReceiptText />} label="Consumos" onClick={() => setSection("expenses")} />
           <NavButton active={section === "imports"} icon={<Upload />} label="Carga de Resumenes" onClick={() => setSection("imports")} />
           <NavButton active={section === "cash"} icon={<WalletCards />} label="Efectivo" onClick={() => setSection("cash")} />
+          <NavButton active={section === "fund"} icon={<PiggyBank />} label="Fondo común" onClick={() => setSection("fund")} />
           <NavButton active={section === "history"} icon={<HistoryIcon />} label="Historial" onClick={() => setSection("history")} />
           <NavButton active={section === "receipts"} icon={<ClipboardList />} label="Tickets" onClick={() => setSection("receipts")} />
           <NavButton active={section === "settings"} icon={<Settings />} label="Casa" onClick={() => setSection("settings")} />
@@ -794,6 +766,7 @@ export function App() {
         )}
         {section === "imports" && <Imports categories={cats} users={people} currentUser={authenticatedUser} homeId={homeId} />}
         {section === "cash" && <CashWallet users={people} homeId={homeId} />}
+        {section === "fund" && <HouseholdFund users={people} currentUser={authenticatedUser} homeId={homeId} />}
         {section === "history" && <HistoryPanel users={people} homeId={homeId} />}
         {section === "receipts" && <ReceiptsLab categories={cats} expenses={expenses.data ?? []} homeId={homeId} />}
         {section === "settings" && <SettingsPanel categories={cats} users={people} homeId={homeId} />}
@@ -865,6 +838,7 @@ function titleFor(section: string) {
     expenses: "Consumos del hogar",
     imports: "Carga de Resumenes",
     cash: "Billetera de efectivo",
+    fund: "Fondo común del hogar",
     history: "Historial",
     receipts: "Tickets de compras",
     settings: "Configuracion de casa",
@@ -936,6 +910,7 @@ function MercadoPagoSelfPanel({ currentUser, homeId }: { currentUser: User; home
   const [token, setToken] = useState("");
   const today = useMemo(() => currentDateInputValue(), []);
   const [range, setRange] = useState(() => ({ start_date: today, end_date: today }));
+  const [regenerate, setRegenerate] = useState(false);
   const [message, setMessage] = useState("");
   const queryClient = useQueryClient();
   const mercadoPago = useQuery({ queryKey: ["mercadopago", homeId], queryFn: () => api.mercadoPagoIntegrations(homeId) });
@@ -953,11 +928,11 @@ function MercadoPagoSelfPanel({ currentUser, homeId }: { currentUser: User; home
   });
   const syncMercadoPago = useMutation({
     mutationKey: ["mercadopago-sync", homeId, currentUser.id],
-    mutationFn: ({ startDate, endDate }: { startDate?: string; endDate?: string }) =>
+    mutationFn: ({ startDate, endDate, forceRegenerate = false }: { startDate?: string; endDate?: string; forceRegenerate?: boolean }) =>
       api.syncMercadoPago(
         homeId,
         currentUser.id,
-        startDate || endDate ? { start_date: startDate || undefined, end_date: endDate || undefined } : undefined
+        startDate || endDate ? { start_date: startDate || undefined, end_date: endDate || undefined, regenerate: forceRegenerate } : undefined
       ),
     onSuccess: () => {
       setMessage("Sincronizacion iniciada");
@@ -982,6 +957,7 @@ function MercadoPagoSelfPanel({ currentUser, homeId }: { currentUser: User; home
     previousSyncStatus.current = integration?.last_sync_status;
   }, [integration?.last_sync_duplicates, integration?.last_sync_ignored, integration?.last_sync_imported, integration?.last_sync_status]);
   const syncKind = syncMercadoPago.variables?.startDate || syncMercadoPago.variables?.endDate ? "range" : "now";
+  const validRange = Boolean(range.start_date && range.end_date && range.start_date <= range.end_date && range.end_date <= today);
   return (
     <div className="panel profile-panel wide">
       <h2>Mercado Pago</h2>
@@ -1066,23 +1042,25 @@ function MercadoPagoSelfPanel({ currentUser, homeId }: { currentUser: User; home
               type="date"
               value={range.end_date}
               aria-label="Hasta Mercado Pago"
+              min={range.start_date || undefined}
               max={today}
               onChange={(event) => setRange((current) => ({ ...current, end_date: event.target.value }))}
             />
           </label>
           <button
             className="mp-sync-button"
-            disabled={!integration?.connected || syncMercadoPago.isPending || backendSyncing || !range.start_date || !range.end_date}
+            disabled={!integration?.connected || syncMercadoPago.isPending || backendSyncing || !validRange}
             onClick={() => {
               if (!range.start_date || !range.end_date) return;
               syncMercadoPago.reset();
               setMessage("");
-              syncMercadoPago.mutate({ startDate: range.start_date, endDate: range.end_date });
+              syncMercadoPago.mutate({ startDate: range.start_date, endDate: range.end_date, forceRegenerate: regenerate });
             }}
           >
             {(syncMercadoPago.isPending || backendSyncing) && syncKind === "range" ? <LoaderCircle className="spin" size={16} /> : <CalendarClock size={16} />}
             {(syncMercadoPago.isPending || backendSyncing) && syncKind === "range" ? "Sincronizando rango" : "Sincronizar rango"}
           </button>
+          <label className="mp-regenerate-toggle"><input type="checkbox" checked={regenerate} onChange={(event) => setRegenerate(event.target.checked)} /> Regenerar reporte aunque ya exista</label>
         </div>
         {connectMercadoPago.isError && <p className="form-error settings-error">{connectMercadoPago.error.message}</p>}
         {syncMercadoPago.isError && <p className="form-error settings-error">{syncMercadoPago.error.message}</p>}
@@ -1094,16 +1072,20 @@ function MercadoPagoSelfPanel({ currentUser, homeId }: { currentUser: User; home
 
 function MercadoPagoImportSync({ currentUser, homeId }: { currentUser: User; homeId: number }) {
   const queryClient = useQueryClient();
+  const today = useMemo(() => currentDateInputValue(), []);
+  const [syncRange, setSyncRange] = useState(() => ({ start_date: today, end_date: today }));
+  const [regenerate, setRegenerate] = useState(false);
   const mercadoPago = useQuery({ queryKey: ["mercadopago", homeId], queryFn: () => api.mercadoPagoIntegrations(homeId) });
   const integration = (mercadoPago.data ?? []).find((item) => item.user_id === currentUser.id);
   const backendSyncing = integration?.last_sync_status === "running";
   const syncMercadoPago = useMutation({
     mutationKey: ["mercadopago-sync", homeId, currentUser.id],
-    mutationFn: () => api.syncMercadoPago(homeId, currentUser.id),
+    mutationFn: (range?: { start_date: string; end_date: string; regenerate?: boolean }) => api.syncMercadoPago(homeId, currentUser.id, range),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] });
     }
   });
+  const validRange = Boolean(syncRange.start_date && syncRange.end_date && syncRange.start_date <= syncRange.end_date && syncRange.end_date <= today);
   return (
     <div className="panel import-drop mp-import-card">
       <div>
@@ -1119,16 +1101,17 @@ function MercadoPagoImportSync({ currentUser, homeId }: { currentUser: User; hom
         {integration?.last_sync_status === "error" && integration.last_sync_error && <small className="form-error">{integration.last_sync_error}</small>}
         {syncMercadoPago.isError && <small className="form-error">{syncMercadoPago.error.message}</small>}
       </div>
-      <button
-        className="primary"
-        type="button"
-        disabled={!integration?.connected || syncMercadoPago.isPending || backendSyncing}
-        onClick={() => syncMercadoPago.mutate()}
-        aria-label="Sincronizar Mercado Pago desde resumenes"
-      >
-        {syncMercadoPago.isPending || backendSyncing ? <LoaderCircle className="spin" size={16} /> : <CalendarClock size={16} />}
-        {syncMercadoPago.isPending || backendSyncing ? "Sincronizando Mercado Pago" : "Sincronizar Mercado Pago"}
-      </button>
+      <div className="mp-import-sync-actions">
+        <button className="primary" type="button" disabled={!integration?.connected || syncMercadoPago.isPending || backendSyncing} onClick={() => syncMercadoPago.mutate(undefined)} aria-label="Sincronizar Mercado Pago desde resumenes">
+          {syncMercadoPago.isPending || backendSyncing ? <LoaderCircle className="spin" size={16} /> : <CalendarClock size={16} />}
+          {syncMercadoPago.isPending || backendSyncing ? "Sincronizando Mercado Pago" : "Sincronizar Mercado Pago"}
+        </button>
+        <label><span>Desde</span><input type="date" aria-label="Desde Mercado Pago desde resumenes" value={syncRange.start_date} max={syncRange.end_date || today} onChange={(event) => setSyncRange((current) => ({ ...current, start_date: event.target.value }))} /></label>
+        <label><span>Hasta</span><input type="date" aria-label="Hasta Mercado Pago desde resumenes" value={syncRange.end_date} min={syncRange.start_date || undefined} max={today} onChange={(event) => setSyncRange((current) => ({ ...current, end_date: event.target.value }))} /></label>
+        <button className="mp-sync-button" type="button" disabled={!integration?.connected || !validRange || syncMercadoPago.isPending || backendSyncing} onClick={() => syncMercadoPago.mutate({ ...syncRange, regenerate })}>Sincronizar rango</button>
+        <label className="mp-regenerate-toggle"><input type="checkbox" checked={regenerate} onChange={(event) => setRegenerate(event.target.checked)} /> Regenerar reporte aunque ya exista</label>
+      </div>
+      <small className="muted">Para fechas anteriores a hoy se reutiliza un reporte disponible o una tarea pendiente del mismo rango. Regenerar solicita uno nuevo.</small>
     </div>
   );
 }
@@ -2018,7 +2001,7 @@ function Expenses(props: {
               setDescription(e.target.value);
               if (!sharedTouched) setIsShared(initialSharedSuggestion(e.target.value, selectedCategory?.name));
             }} aria-label="Descripcion" placeholder="Descripcion" />
-            <input value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="Importe" inputMode="decimal" />
+            <input value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="Importe" placeholder="Monto" inputMode="decimal" />
             <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagado por">
               {props.users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
             </select>
@@ -2175,10 +2158,10 @@ function Expenses(props: {
                                 </span>
                               )}
                             </td>
-                            <td>{sourceLabel(expense.source)}</td>
-                            <td>
+                            <td className="source-cell"><span className="source-label">{sourceLabel(expense.source)}</span></td>
+                            <td className="shared-cell">
                               {isEditing ? (
-                                <label className="check-row form-check">
+                                <label className="check-row form-check edit-shared-check">
                                   <input
                                     type="checkbox"
                                     checked={editIsShared}
@@ -2510,7 +2493,7 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
       {(uploadCard.isPending || uploadAccount.isPending) && <div className="panel">Parseando resumen...</div>}
       {batch && (
         <div className="panel table-panel" data-testid={`active-import-${batch.id}`}>
-          {(visibleDuplicateCounts.previously_parsed || visibleDuplicateCounts.already_committed) && (
+          {(visibleDuplicateCounts.previously_parsed > 0 || visibleDuplicateCounts.already_committed > 0) && (
             <div className="warning">
               {visibleDuplicateCounts.previously_parsed ? `${visibleDuplicateCounts.previously_parsed} lineas ya habian sido parseadas pero no convertidas. ` : ""}
               {visibleDuplicateCounts.already_committed ? `${visibleDuplicateCounts.already_committed} lineas ya fueron convertidas a consumos y quedan desmarcadas para evitar duplicarlas.` : ""}
@@ -2861,7 +2844,6 @@ function HistoryPanel({ users, homeId }: { users: User[]; homeId: number }) {
   const [tab, setTab] = useState<"log" | "imports">("log");
   const history = useQuery({ queryKey: ["history", homeId], queryFn: () => api.history(homeId) });
   const imports = useQuery({ queryKey: ["imports", homeId, "all"], queryFn: () => api.imports(homeId) });
-  const importSummary = useMemo(() => buildImportCoverage(imports.data ?? [], users), [imports.data, users]);
   return (
     <section className="panel table-panel">
       <div className="tabs">
@@ -2887,47 +2869,7 @@ function HistoryPanel({ users, homeId }: { users: User[]; homeId: number }) {
           </table>
         </>
       ) : (
-        <div className="stack">
-          {importSummary.years.map((year) => (
-            <div className="import-coverage" key={year}>
-              <h2>Cargas {year}</h2>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Tipo</th>
-                    <th>Subio</th>
-                    <th>Pago</th>
-                    {Array.from({ length: 12 }, (_, index) => <th key={index}>{axisMonthLabel(`${year}-${String(index + 1).padStart(2, "0")}`)}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {importSummary.rows.map((row) => (
-                    <tr key={row.key}>
-                      <td>{row.source}</td>
-                      <td>{users.find((user) => user.id === row.uploadedByUserId)?.display_name ?? "Usuario"}</td>
-                      <td>{row.paidByUserId ? users.find((user) => user.id === row.paidByUserId)?.display_name ?? "Usuario" : "Sin procesar"}</td>
-                      {Array.from({ length: 12 }, (_, index) => {
-                        const period = `${year}-${String(index + 1).padStart(2, "0")}`;
-                        const value = row.months[period];
-                        return (
-                          <td key={period}>
-                            {value ? (
-                              <div className="import-coverage-cell">
-                                <span className={value.status === "Procesado" ? "status" : "status warning-status"}>{value.status}</span>
-                                {value.fxRate ? <small className="muted">Blue {money(value.fxRate, "ARS")}</small> : null}
-                              </div>
-                            ) : <span className="muted">-</span>}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
-          {!importSummary.years.length && <p className="muted">Todavia no hay importaciones cargadas.</p>}
-        </div>
+        <ImportCoverageTable imports={imports.data ?? []} users={users} />
       )}
     </section>
   );
@@ -3302,6 +3244,280 @@ function ReceiptsLab({ categories, expenses, homeId }: { categories: Category[];
       )}
     </section>
   );
+}
+
+function EconomicInput({ value, onChange, ariaLabel, placeholder, className = "" }: { value: string; onChange: (value: string) => void; ariaLabel: string; placeholder?: string; className?: string }) {
+  return <input className={className} type="text" inputMode="numeric" aria-label={ariaLabel} placeholder={placeholder} value={value === "" ? "" : economicNumber(value)} onChange={(event) => onChange(digitsOnly(event.target.value))} />;
+}
+
+function HelpHint({ text }: { text: string }) {
+  return <span className="help-hint" tabIndex={0} aria-label={text} data-help={text} title={text}><CircleHelp size={16} /></span>;
+}
+
+function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentUser: User; homeId: number }) {
+  const [period, setPeriod] = useState(currentMonthPeriod());
+  const [monthlyAmount, setMonthlyAmount] = useState("4000000");
+  const [shares, setShares] = useState<Record<number, string>>({});
+  const [openingDate, setOpeningDate] = useState(`${currentMonthPeriod()}-01`);
+  const [openingAmount, setOpeningAmount] = useState("0");
+  const [movement, setMovement] = useState({ date: currentDateInputValue(), from: "", to: "fund", amount: "", note: "" });
+  const [editingMovementId, setEditingMovementId] = useState<number | null>(null);
+  const [mpSelectedMonthOnly, setMpSelectedMonthOnly] = useState(false);
+  const [mpOriginNotice, setMpOriginNotice] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const fund = useQuery({ queryKey: ["fund", homeId, period], queryFn: () => api.fundSummary(homeId, period) });
+  const series = useQuery({ queryKey: ["fund-series", homeId], queryFn: () => api.fundSeries(homeId) });
+  const mpActivity = useQuery({ queryKey: ["fund-mp-activity", homeId], queryFn: () => api.fundMpActivity(homeId) });
+  const data = fund.data;
+
+  useEffect(() => {
+    if (data?.config) {
+      setMonthlyAmount(integerValue(data.config.monthly_amount));
+      setShares(Object.fromEntries(data.config.shares.map((item) => [item.user_id, integerValue(item.percentage)])));
+      if (data.opening_balance) {
+        setOpeningDate(data.opening_balance.start_date);
+        setOpeningAmount(integerValue(data.opening_balance.amount));
+      }
+      return;
+    }
+    setOpeningDate(`${period}-01`);
+    setOpeningAmount("0");
+    if (!users.length) return;
+    if (users.length === 2) {
+      const mauro = users.find((item) => item.display_name.toLowerCase().includes("mauro"));
+      const mica = users.find((item) => item.display_name.toLowerCase().includes("mica"));
+      if (mauro && mica) {
+        setShares({ [mauro.id]: "76", [mica.id]: "24" });
+        return;
+      }
+    }
+    const base = Math.floor(100 / users.length);
+    const next = Object.fromEntries(users.map((item) => [item.id, String(base)]));
+    next[users[users.length - 1].id] = String(100 - base * (users.length - 1));
+    setShares(next);
+  }, [data?.config, period, users]);
+
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["fund", homeId] });
+    queryClient.invalidateQueries({ queryKey: ["fund-series", homeId] });
+    queryClient.invalidateQueries({ queryKey: ["fund-mp-activity", homeId] });
+    queryClient.invalidateQueries({ queryKey: ["history", homeId] });
+  };
+  const saveConfig = useMutation({
+    mutationFn: () => api.updateFundConfig(homeId, period, { monthly_amount: monthlyAmount, shares: users.map((item) => ({ user_id: item.id, percentage: shares[item.id] ?? "0" })) }),
+    onSuccess: refresh
+  });
+  const saveOpening = useMutation({
+    mutationFn: () => api.updateFundOpeningBalance(homeId, { start_date: openingDate, amount: openingAmount }),
+    onSuccess: refresh
+  });
+  const activate = useMutation({
+    mutationFn: async () => {
+      await api.updateFundOpeningBalance(homeId, { start_date: openingDate, amount: openingAmount });
+      return api.updateFundConfig(homeId, period, { monthly_amount: monthlyAmount, shares: users.map((item) => ({ user_id: item.id, percentage: shares[item.id] ?? "0" })) });
+    },
+    onSuccess: refresh
+  });
+  const closeOrApprove = useMutation({
+    mutationFn: async () => {
+      let summary: FundSummary = data!;
+      if (summary.status === "abierto") summary = await api.closeFundMonth(homeId, period);
+      const mustApprove = summary.plan?.some((item) => item.from_user_id === currentUser.id && Number(item.amount) > 0);
+      const alreadyApproved = summary.approvals?.some((item) => item.user_id === currentUser.id && item.approved);
+      return mustApprove && !alreadyApproved ? api.approveFundMonth(homeId, period) : summary;
+    },
+    onSuccess: refresh
+  });
+  const reopen = useMutation({ mutationFn: () => api.reopenFundMonth(homeId, period), onSuccess: refresh });
+  const createMovement = useMutation({
+    mutationFn: () => {
+      const payload = { date: movement.date, from_user_id: movement.from === "fund" ? null : Number(movement.from), to_user_id: movement.to === "fund" ? null : Number(movement.to), amount: movement.amount, note: movement.note.trim() || null };
+      return editingMovementId ? api.updateFundMovement(homeId, editingMovementId, payload) : api.createFundMovement(homeId, payload);
+    },
+    onSuccess: () => { setEditingMovementId(null); setMovement((current) => ({ ...current, amount: "", note: "" })); refresh(); }
+  });
+  const deleteMovement = useMutation({ mutationFn: (id: number) => api.deleteFundMovement(homeId, id), onSuccess: refresh });
+  const classifyMp = useMutation({
+    mutationFn: ({ earningId, classification, contributorId, remember }: { earningId: number; classification: string; contributorId: number | null; remember?: boolean }) =>
+      api.updateFundMpContribution(homeId, earningId, { classification, contributor_user_id: contributorId, remember_origin: remember }),
+    onSuccess: (_result, variables) => {
+      refresh();
+      setMpOriginNotice(variables.remember ? "Origen recordado. Se aplicó también a los demás ingresos de ese origen sin clasificación manual." : null);
+    }
+  });
+  const markMpShared = useMutation({
+    mutationFn: (expenseId: number) => api.updateExpense(homeId, expenseId, { is_shared: true }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
+      refresh();
+    }
+  });
+  const roleMutation = useMutation({ mutationFn: (role: "personal" | "fondo_comun") => api.updateMercadoPagoFundRole(homeId, currentUser.id, role), onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["mercadopago", homeId] }); refresh(); } });
+  const shareTotal = users.reduce((sum, item) => sum + Number(shares[item.id] ?? 0), 0);
+  const mutationError = saveConfig.error || saveOpening.error || activate.error || closeOrApprove.error || reopen.error || createMovement.error || classifyMp.error || markMpShared.error || roleMutation.error;
+
+  if (fund.isLoading) return <section className="panel"><p className="muted">Calculando el fondo común…</p></section>;
+  if (fund.isError || !data) return <section className="panel"><p className="form-error">{fund.error?.message ?? "No se pudo cargar el fondo común."}</p></section>;
+
+  if (!data.activated) {
+    return (
+      <section className="fund-page grid">
+        <div className="fund-toolbar panel">
+          <div>
+            <span className="eyebrow">Período</span>
+            <input aria-label="Mes del fondo" type="month" value={period} onChange={(event) => setPeriod(event.target.value)} />
+            <HelpHint text="Elegí el mes que querés consultar o configurar. Podés volver a otro mes aunque éste todavía no tenga fondo iniciado." />
+          </div>
+          <span className={`fund-status ${data.status}`}>{fundStatusLabel(data.status)}</span>
+        </div>
+        <div className="fund-activation panel">
+          <div className="fund-section-heading">
+            <div><span className="eyebrow">Activación</span><h2>Empezá desde un saldo real</h2></div>
+            <HelpHint text="Define desde qué mes empieza el fondo y cuánto dinero real había disponible. No reconstruye ni modifica meses anteriores." />
+          </div>
+          <p className="muted">No reconstruiremos meses anteriores. La fecha y el saldo inicial serán el punto de partida verificable.</p>
+          <div className="fund-config-grid activation-grid">
+            <label><span>Fecha de inicio</span><input type="date" value={openingDate} min={`${period}-01`} max={`${period}-01`} onChange={(event) => setOpeningDate(event.target.value)} /></label>
+            <label><span>Saldo inicial real</span><EconomicInput ariaLabel="Saldo inicial real" value={openingAmount} onChange={setOpeningAmount} /></label>
+            <label><span>Fondo mensual</span><EconomicInput ariaLabel="Fondo mensual" value={monthlyAmount} onChange={setMonthlyAmount} /></label>
+            {users.map((member) => <label className="fund-percent-field" key={member.id}><span>{member.display_name} (%)</span><input className="fund-percent-input" type="text" inputMode="numeric" maxLength={3} value={shares[member.id] ?? ""} onChange={(event) => setShares((current) => ({ ...current, [member.id]: digitsOnly(event.target.value, 100) }))} /></label>)}
+            <div className={Math.abs(shareTotal - 100) < .0001 ? "fund-share-total valid" : "fund-share-total invalid"}>Total: {economicNumber(shareTotal)}%</div>
+          </div>
+          <button className="primary" disabled={activate.isPending || Math.abs(shareTotal - 100) >= .0001 || Number(monthlyAmount) <= 0} onClick={() => activate.mutate()}><PiggyBank size={16} /> Activar fondo común</button>
+          {activate.isError && <p className="form-error">{activate.error.message}</p>}
+        </div>
+      </section>
+    );
+  }
+
+  const totals = data.totals!;
+  const ownApproval = data.approvals?.find((item) => item.user_id === currentUser.id);
+  const ownObligation = data.plan?.filter((item) => item.from_user_id === currentUser.id).reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+  const canCloseOrApprove = data.status === "abierto" || (data.status === "pendiente_aprobacion" && ownObligation > 0 && !ownApproval?.approved);
+  const mpIncomes = (mpActivity.data?.incomes ?? []).filter((item) => !mpSelectedMonthOnly || item.date.startsWith(period));
+  const mpPersonalOutflows = (mpActivity.data?.personal_outflows ?? []).filter((item) => !mpSelectedMonthOnly || item.date.startsWith(period));
+  const chartRows = (series.data ?? []).map((item) => ({ ...item, configured_fund: Number(item.configured_fund), shared_expenses: Number(item.shared_expenses), surplus_or_excess: Number(item.surplus_or_excess), agreed_balance: Number(item.agreed_balance), verified_balance: Number(item.verified_balance) }));
+  const surplusRange = Math.max(1, ...chartRows.map((row) => Math.abs(row.surplus_or_excess))) * 1.25;
+  return (
+    <section className="fund-page grid">
+      <div className="fund-toolbar panel">
+        <div>
+          <span className="eyebrow">Período</span>
+          <input aria-label="Mes del fondo" type="month" value={period} onChange={(event) => setPeriod(event.target.value)} />
+          <HelpHint text="Cambia el mes consultado. La configuración se hereda del último mes configurado, sin alterar meses anteriores." />
+        </div>
+        <span className={`fund-status ${data.status}`}>{fundStatusLabel(data.status)}</span>
+        {data.config?.inherited && <small>Configuración heredada de {monthLabel(data.config.source_period)}</small>}
+      </div>
+      {data.alerts.map((alert) => <div className={alert.includes("superan") || data.status === "desactualizado" ? "warning fund-alert danger-alert" : "warning fund-alert"} key={alert}><AlertTriangle size={17} /> {alert}</div>)}
+
+      <div className="fund-metrics">
+        <FundMetric label="Fondo del mes" value={totals.configured_fund} help="Objetivo mensual configurado para financiar los gastos compartidos." />
+        <FundMetric label="Gastos compartidos" value={totals.shared_expenses} help="Suma de consumos marcados como compartidos asignados a este período." />
+        <FundMetric label={Number(totals.surplus_or_excess) >= 0 ? "Sobrante" : "Exceso"} value={Math.abs(Number(totals.surplus_or_excess))} danger={Number(totals.surplus_or_excess) < 0} help="Diferencia entre el fondo mensual y los gastos compartidos. Un exceso aumenta la base a financiar." />
+        <FundMetric label="Saldo acordado" value={totals.agreed_balance} help="Saldo que debería quedar después de cumplir el cierre acordado, aunque las transferencias aún no estén verificadas." />
+        <FundMetric label="Saldo verificado" value={totals.verified_balance} help="Dinero respaldado por el saldo inicial y movimientos reales registrados o importados." />
+        <FundMetric label="Diferencia" value={totals.difference} danger={Math.abs(Number(totals.difference)) > .01} help="Diferencia entre el saldo real verificado y el saldo acordado. Indica movimientos pendientes de conciliar." />
+      </div>
+
+      <div className="fund-positions">
+        {data.positions?.map((position) => <article className="panel fund-person" key={position.user_id}><div><strong>{position.display_name}</strong><span>{economicNumber(position.percentage)}%</span><HelpHint text="Resume cuánto le corresponde cubrir a esta persona, cuánto adelantó o aportó y qué importe todavía debe pagar o recibir." /></div><dl><div><dt>Debe cubrir</dt><dd>{money(position.quota)}</dd></div><div><dt>Adelantó</dt><dd>{money(position.direct_paid)}</dd></div><div><dt>Aportes / reintegros</dt><dd>{money(position.contributed)}</dd></div><div><dt>{Number(position.outstanding) >= 0 ? "Pendiente" : "A recibir"}</dt><dd>{money(Math.abs(Number(position.outstanding)))}</dd></div></dl></article>)}
+      </div>
+
+      <div className="panel fund-plan">
+        <div className="fund-section-heading"><div><span className="eyebrow">Plan automático</span><h2>Para cerrar {monthLabel(period)}</h2></div><HelpHint text="Distribuye primero reintegros entre personas y luego indica cuánto debe quedar en el fondo. Aceptar sólo guarda el acuerdo: no realiza transferencias." /></div>
+        {data.plan?.length ? <div className="fund-plan-list">{data.plan.map((item, index) => <div key={`${item.from_user_id}-${item.to_user_id}-${index}`}><span>{item.from_name} <strong>→</strong> {item.to_name}{item.reason === "personal_mp_outflow" && <small className="fund-plan-reason">Reponer compra personal de la cuenta MP del fondo</small>}</span><strong>{money(item.amount)}</strong></div>)}</div> : <p className="muted">No quedan transferencias pendientes para este cierre.</p>}
+        {ownObligation > 0 && <p className="fund-own-callout">Te corresponde completar {money(ownObligation)}. Aceptar guarda el acuerdo; no ejecuta transferencias.</p>}
+        <div className="fund-close-actions">
+          {data.status === "desactualizado" ? <button className="primary" disabled={reopen.isPending} onClick={() => reopen.mutate()}>Reabrir y recalcular</button> : canCloseOrApprove ? <button className="primary" disabled={closeOrApprove.isPending} onClick={() => closeOrApprove.mutate()}>{closeOrApprove.isPending ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} {ownObligation > 0 ? `Aceptar mi parte y cerrar ${monthLabel(period)}` : `Calcular cierre de ${monthLabel(period)}`}</button> : <span className="status">{data.status === "cerrado" ? "Cierre aceptado" : "Esperando las demás aprobaciones"}</span>}
+          {data.approvals?.map((item) => <span className={item.approved ? "status" : "status warning-status"} key={item.user_id}>{item.display_name}: {item.approved ? "aceptado" : "pendiente"}</span>)}
+        </div>
+      </div>
+
+      <div className="grid two fund-charts">
+        <div className="panel chart-panel"><div className="fund-chart-heading"><h2>Gastos frente al fondo</h2><HelpHint text="Compara el objetivo mensual con los gastos compartidos efectivos de cada mes." /></div><ResponsiveContainer width="100%" height={260}><BarChart data={chartRows} margin={{ top: 28, right: 8, left: 8, bottom: 0 }}><CartesianGrid stroke="#1e293b" vertical={false} /><XAxis dataKey="period" stroke="#94a3b8" /><YAxis hide /><Tooltip formatter={(value) => money(Number(value))} /><Bar dataKey="configured_fund" name="Fondo" fill="#38bdf8" radius={[4,4,0,0]} isAnimationActive={false}><LabelList dataKey="configured_fund" position="top" formatter={(value: unknown) => economicNumber(Number(value))} fill="#bae6fd" fontSize={11} /></Bar><Bar dataKey="shared_expenses" name="Gastos" fill="#f59e0b" radius={[4,4,0,0]} isAnimationActive={false}><LabelList dataKey="shared_expenses" position="top" formatter={(value: unknown) => economicNumber(Number(value))} fill="#fde68a" fontSize={11} /></Bar></BarChart></ResponsiveContainer></div>
+        <div className="panel chart-panel"><div className="fund-chart-heading"><h2>Sobrante o exceso</h2><HelpHint text="Muestra cuánto quedó por debajo del fondo o cuánto lo superaron los gastos en cada mes." /></div><ResponsiveContainer width="100%" height={260}><BarChart data={chartRows} margin={{ top: 28, right: 8, left: 8, bottom: 0 }}><CartesianGrid stroke="#1e293b" vertical={false} /><XAxis dataKey="period" stroke="#94a3b8" /><YAxis hide domain={[-surplusRange, surplusRange]} /><Tooltip formatter={(value) => money(Number(value))} /><ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1.5} /><Bar dataKey="surplus_or_excess" name="Resultado" radius={[4,4,0,0]} isAnimationActive={false}>{chartRows.map((row) => <Cell key={row.period} fill={row.surplus_or_excess >= 0 ? "#22c55e" : "#ef4444"} />)}<LabelList dataKey="surplus_or_excess" content={<FundDivergingLabel />} /></Bar></BarChart></ResponsiveContainer></div>
+        <div className="panel chart-panel wide"><div className="fund-chart-heading"><h2>Evolución de saldos</h2><HelpHint text="Contrasta el saldo acordado al cerrar cada mes con el saldo que está respaldado por movimientos reales." /></div><ResponsiveContainer width="100%" height={280}><AreaChart data={chartRows} margin={{ top: 32, right: 28, left: 28, bottom: 0 }}><defs><linearGradient id="agreedFund" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#38bdf8" stopOpacity={.45}/><stop offset="100%" stopColor="#38bdf8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#1e293b" vertical={false} /><XAxis dataKey="period" stroke="#94a3b8" /><YAxis hide /><Tooltip formatter={(value) => money(Number(value))} /><Area dataKey="agreed_balance" name="Acordado" stroke="#38bdf8" fill="url(#agreedFund)" isAnimationActive={false}><LabelList dataKey="agreed_balance" position="top" formatter={(value: unknown) => economicNumber(Number(value))} fill="#bae6fd" fontSize={11} /></Area><Area dataKey="verified_balance" name="Verificado" stroke="#22c55e" fill="transparent" isAnimationActive={false}><LabelList dataKey="verified_balance" position="bottom" formatter={(value: unknown) => economicNumber(Number(value))} fill="#bbf7d0" fontSize={11} /></Area></AreaChart></ResponsiveContainer></div>
+      </div>
+
+      <div className="panel fund-movement-panel">
+        <div className="fund-section-heading"><div><span className="eyebrow">Movimientos reales</span><h2>Registrar aporte o reintegro</h2></div><HelpHint text="Registra transferencias reales entre personas y el fondo. Persona a persona redistribuye quién soportó el gasto; persona a fondo aumenta el saldo verificado." /></div>
+        <form className="fund-movement-form" onSubmit={(event) => { event.preventDefault(); createMovement.mutate(); }}>
+          <input aria-label="Fecha del movimiento" type="date" value={movement.date} onChange={(event) => setMovement((current) => ({ ...current, date: event.target.value }))} required />
+          <select aria-label="Origen del movimiento" value={movement.from} onChange={(event) => setMovement((current) => ({ ...current, from: event.target.value }))} required><option value="">Origen…</option><option value="fund">Fondo común</option>{users.map((item) => <option value={item.id} key={item.id}>{item.display_name}</option>)}</select>
+          <span>→</span>
+          <select aria-label="Destino del movimiento" value={movement.to} onChange={(event) => setMovement((current) => ({ ...current, to: event.target.value }))} required><option value="fund">Fondo común</option>{users.map((item) => <option value={item.id} key={item.id}>{item.display_name}</option>)}</select>
+          <EconomicInput ariaLabel="Importe del movimiento" placeholder="Monto" value={movement.amount} onChange={(value) => setMovement((current) => ({ ...current, amount: value }))} />
+          <input aria-label="Nota del movimiento" placeholder="Nota" value={movement.note} onChange={(event) => setMovement((current) => ({ ...current, note: event.target.value }))} />
+          <button className="primary" disabled={createMovement.isPending || !movement.from || movement.from === movement.to}>{editingMovementId ? <Save size={16} /> : <Plus size={16} />} {editingMovementId ? "Guardar" : "Registrar"}</button>
+        </form>
+        <div className="table-wrap"><table><thead><tr><th>Fecha</th><th>Movimiento</th><th>Tipo</th><th>Importe</th><th></th></tr></thead><tbody>{data.movements?.map((item) => <tr key={`${item.kind}-${item.id}`}><td>{item.date}</td><td>{item.label}{item.note && <small>{item.note}</small>}</td><td>{item.kind === "manual" ? "Manual" : item.kind === "mp_contribution" ? "Ingreso MP" : item.kind === "closure" ? "Cierre" : "Derivado"}</td><td>{money(item.amount)}</td><td>{item.editable && <div className="row-actions"><button className="icon-button" title="Editar movimiento" onClick={() => { setEditingMovementId(Number(item.id)); setMovement({ date: item.date, from: item.from_user_id == null ? "fund" : String(item.from_user_id), to: item.to_user_id == null ? "fund" : String(item.to_user_id), amount: item.amount, note: item.note ?? "" }); }}><Settings size={15} /></button><button className="icon-button danger" title="Eliminar movimiento" onClick={() => deleteMovement.mutate(Number(item.id))}><Trash2 size={15} /></button></div>}</td></tr>)}</tbody></table></div>
+      </div>
+
+      <div className="panel fund-mp-panel">
+        <div className="fund-section-heading"><div><span className="eyebrow">Mercado Pago</span><h2>Cuentas del fondo e ingresos</h2></div><HelpHint text="Cada titular decide si su cuenta Mercado Pago es la billetera del fondo. Sólo las cuentas activadas entran en el saldo verificado: sus compras compartidas descuentan del fondo, sus ingresos se asignan al aportante real y una compra personal queda como salida a conciliar del titular." /></div>
+        <div className="fund-mp-accounts">
+          {users.map((member) => { const integration = data.mp_integrations.find((item) => item.user_id === member.id); const own = member.id === currentUser.id; return <label className="fund-mp-account" key={member.id}>
+            <input type="checkbox" aria-label={`Usar cuenta MP de ${member.display_name} para el fondo`} checked={own && roleMutation.isPending ? roleMutation.variables === "fondo_comun" : integration?.fund_role === "fondo_comun"} disabled={!integration || !own || roleMutation.isPending} onChange={(event) => roleMutation.mutate(event.target.checked ? "fondo_comun" : "personal")} />
+            <span><strong>{member.display_name}</strong><small>{integration ? integration.nickname || "Cuenta Mercado Pago conectada" : "Sin cuenta MP conectada"}{!own && " · sólo el titular puede cambiarla"}</small></span>
+          </label>; })}
+        </div>
+        <p className="muted fund-mp-explainer">Las compras nuevas de una cuenta MP del fondo se importan como compartidas por defecto. Las compras personales anteriores o excepcionales se pueden corregir aquí o en Consumos.</p>
+        <div className="fund-mp-subheading"><div><h3>Ingresos a las cuentas del fondo</h3><HelpHint text="Se muestran ingresos de todos los meses de las cuentas MP activadas. Se asignan por un origen recordado o, si coincide un único integrante, por nombre de pagador; esta última coincidencia conviene revisarla. Si no hay datos suficientes, elegí el aportante o dejalo pendiente. Excluir evita contarlo como dinero del fondo." /></div><label><input type="checkbox" checked={mpSelectedMonthOnly} onChange={(event) => setMpSelectedMonthOnly(event.target.checked)} /> Sólo {monthLabel(period)}</label></div>
+        {mpOriginNotice && <p className="fund-own-callout" role="status">{mpOriginNotice}</p>}
+        {mpActivity.isLoading ? <p className="muted">Cargando movimientos MP…</p> : mpActivity.isError ? <p className="form-error">{mpActivity.error.message}</p> : mpIncomes.length ? (
+          <div className="fund-mp-list">{mpIncomes.map((item) => (
+            <div className="fund-mp-row" key={item.earning_id}>
+              <div>
+                <strong>{item.description}</strong>
+                <small>{item.date} · cuenta de {item.account_name ?? "titular"} · {money(item.amount_ars)}</small>
+                <small>{item.payer_name ? `Pagador: ${item.payer_name}` : "Pagador no informado"}{item.payer_document_suffix ? ` · documento ••••${item.payer_document_suffix}` : ""}{item.payment_method_type ? ` · ${item.payment_method_type}` : ""}</small>
+                <small>{item.stable_origin_id ? `Origen verificable: ${item.stable_origin_id}` : "Origen sin identificar"}{item.assignment_source === "rule" ? " · asignado por origen recordado" : item.assignment_source === "payer_name" ? " · asignado por nombre (revisar)" : item.assignment_source === "manual" ? " · asignado manualmente" : ""}</small>
+              </div>
+              <select aria-label={`Clasificar ${item.description}`} value={item.classification === "contribution" ? String(item.contributor_user_id) : item.classification} disabled={classifyMp.isPending} onChange={(event) => {
+                setMpOriginNotice(null);
+                const value = event.target.value;
+                classifyMp.mutate({ earningId: item.earning_id, classification: /^\d+$/.test(value) ? "contribution" : value, contributorId: /^\d+$/.test(value) ? Number(value) : null });
+              }}>
+                <option value="pending">Pendiente</option>
+                {users.map((member) => <option key={member.id} value={member.id}>Aporte de {member.display_name}</option>)}
+                <option value="excluded">Excluir</option>
+              </select>
+              {item.classification === "contribution" && item.can_remember_origin && <button className="mp-sync-button" type="button" disabled={classifyMp.isPending} onClick={() => classifyMp.mutate({ earningId: item.earning_id, classification: "contribution", contributorId: item.contributor_user_id, remember: true })}>Recordar origen</button>}
+            </div>
+          ))}</div>
+        ) : <p className="muted">No hay ingresos de cuentas MP del fondo {mpSelectedMonthOnly ? "en este mes" : "todavía"}.</p>}
+        <div className="fund-mp-subheading"><div><h3>Salidas personales a conciliar</h3><HelpHint text="Si por error se pagó una compra personal desde una cuenta del fondo, se atribuye al titular y reduce el saldo real. Sus depósitos al fondo de ese mismo mes reponen primero esta salida; si queda un importe pendiente, aparece separado en el plan de cierre. No se suma a los gastos compartidos." /></div></div>
+        {mpPersonalOutflows.length ? <div className="fund-mp-personal-list">{mpPersonalOutflows.map((item) => <div className="fund-mp-personal-row" key={item.expense_id}><div><strong>{item.description}</strong><small>{item.date} · cuenta de {item.account_name ?? "titular"} · compra personal</small></div><strong>{money(item.amount_ars)}</strong><button className="mp-sync-button" type="button" disabled={markMpShared.isPending} onClick={() => markMpShared.mutate(item.expense_id)}>Marcar compartida</button></div>)}</div> : <p className="muted">No hay compras personales en las cuentas MP del fondo {mpSelectedMonthOnly ? "en este mes" : "todavía"}.</p>}
+        {Number(totals.personal_to_repay) > 0 && <p className="fund-own-callout">Pendiente de reponer en {monthLabel(period)}: {money(totals.personal_to_repay)}. Registrá una transferencia del titular al fondo en “Registrar aporte o reintegro”.</p>}
+      </div>
+      <div className="panel fund-config-panel">
+        <div className="fund-section-heading"><div><span className="eyebrow">Configuración mensual</span><h2>Monto y distribución</h2></div><div className="fund-heading-actions"><HelpHint text="Define el objetivo mensual y qué porcentaje corresponde a cada integrante. El cambio rige desde este mes hacia adelante hasta una nueva configuración." /><button className="primary" disabled={saveConfig.isPending || Math.abs(shareTotal - 100) >= .0001} onClick={() => saveConfig.mutate()}><Save size={16} /> Guardar desde {monthLabel(period)}</button></div></div>
+        <div className="fund-config-grid compact">
+          <label className="fund-amount-field"><span>Fondo mensual</span><EconomicInput ariaLabel="Fondo mensual" value={monthlyAmount} onChange={setMonthlyAmount} /></label>
+          {users.map((member) => <label className="fund-percent-field" key={member.id}><span>{member.display_name} (%)</span><input className="fund-percent-input" type="text" inputMode="numeric" maxLength={3} value={shares[member.id] ?? ""} onChange={(event) => setShares((current) => ({ ...current, [member.id]: digitsOnly(event.target.value, 100) }))} /></label>)}
+          <div className={Math.abs(shareTotal - 100) < .0001 ? "fund-share-total valid" : "fund-share-total invalid"}>Total {economicNumber(shareTotal)}%</div>
+        </div>
+        <div className="fund-opening-editor"><label><span>Inicio del saldo real</span><input type="date" value={openingDate} onChange={(event) => setOpeningDate(event.target.value)} /></label><label><span>Saldo inicial verificado</span><EconomicInput ariaLabel="Saldo inicial verificado" value={openingAmount} onChange={setOpeningAmount} /></label><button className="mp-sync-button" disabled={saveOpening.isPending} onClick={() => saveOpening.mutate()}>Corregir saldo inicial</button></div>
+      </div>
+      {mutationError && <p className="form-error">{mutationError.message}</p>}
+    </section>
+  );
+}
+
+function FundMetric({ label, value, danger = false, help }: { label: string; value: string | number; danger?: boolean; help: string }) {
+  return <article className={danger ? "metric fund-metric danger" : "metric fund-metric"}><div className="fund-metric-heading"><span>{label}</span><HelpHint text={help} /></div><strong>{money(value)}</strong></article>;
+}
+
+function FundDivergingLabel({ x = 0, y = 0, width = 0, height = 0, value = 0 }: { x?: number | string; y?: number | string; width?: number | string; height?: number | string; value?: number | string }) {
+  const amount = Number(value);
+  if (!amount) return null;
+  return <text className="fund-diverging-label" x={Number(x) + Number(width) / 2} y={amount > 0 ? Number(y) - 8 : Number(y) + Number(height) + 15} textAnchor="middle" fill="#e2e8f0" fontSize={11}>{economicNumber(amount)}</text>;
+}
+
+function fundStatusLabel(status: FundSummary["status"]) {
+  return { abierto: "Abierto", pendiente_aprobacion: "Pendiente de aprobación", cerrado: "Cerrado", desactualizado: "Cierre desactualizado" }[status];
 }
 
 function SettingsPanel({ categories, users, homeId }: { categories: Category[]; users: User[]; homeId: number }) {
