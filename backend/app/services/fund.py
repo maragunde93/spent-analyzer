@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -164,23 +165,35 @@ def ensure_mp_assignments(db: Session, home_group_id: int) -> list[FundMpAssignm
         (item.integration_id, item.stable_origin_id): item
         for item in db.scalars(select(FundMpOriginRule).where(FundMpOriginRule.home_group_id == home_group_id))
     }
+    member_names = {
+        user.id: user.display_name
+        for user in db.scalars(
+            select(User).join(Membership, Membership.user_id == User.id)
+            .where(Membership.home_group_id == home_group_id)
+        )
+    }
     for earning, line, _batch, integration in rows:
-        if earning.id in existing:
-            assignment = existing[earning.id]
-            if not assignment.stable_origin_id and line.mercadopago_origin_id:
-                assignment.stable_origin_id = line.mercadopago_origin_id
-                rule = rules.get((integration.id, assignment.stable_origin_id))
-                if rule and assignment.classification == "pending" and assignment.updated_by_user_id is None:
-                    assignment.classification = "contribution"
-                    assignment.contributor_user_id = rule.user_id
-                db.flush()
-            continue
         origin = line.mercadopago_origin_id
         rule = rules.get((integration.id, origin)) if origin else None
+        try:
+            raw = json.loads(line.raw_text) if line.raw_text else {}
+        except (TypeError, ValueError):
+            raw = {}
+        payer_name = raw.get("PAYER_NAME") if isinstance(raw, dict) else None
+        inferred_user_id = rule.user_id if rule else _member_for_payer_name(payer_name, member_names)
+        if earning.id in existing:
+            assignment = existing[earning.id]
+            if assignment.stable_origin_id != origin:
+                assignment.stable_origin_id = origin
+            if assignment.updated_by_user_id is None:
+                assignment.classification = "contribution" if inferred_user_id else "pending"
+                assignment.contributor_user_id = inferred_user_id
+                db.flush()
+            continue
         values = {
             "home_group_id": home_group_id, "earning_id": earning.id, "integration_id": integration.id,
-            "contributor_user_id": rule.user_id if rule else None,
-            "classification": "contribution" if rule else "pending", "stable_origin_id": origin,
+            "contributor_user_id": inferred_user_id,
+            "classification": "contribution" if inferred_user_id else "pending", "stable_origin_id": origin,
         }
         dialect = db.get_bind().dialect.name
         if dialect == "sqlite":
@@ -192,6 +205,28 @@ def ensure_mp_assignments(db: Session, home_group_id: int) -> list[FundMpAssignm
         db.execute(statement)
         existing[earning.id] = db.scalar(select(FundMpAssignment).where(FundMpAssignment.earning_id == earning.id))
     return list(existing.values())
+
+
+def _member_for_payer_name(payer_name: object, member_names: dict[int, str]) -> int | None:
+    if not isinstance(payer_name, str):
+        return None
+    def tokens(value: str) -> list[str]:
+        normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
+        return re.findall(r"[a-z]+", normalized)
+
+    payer_tokens = tokens(payer_name)
+    if not payer_tokens:
+        return None
+    matches = []
+    for user_id, display_name in member_names.items():
+        member_tokens = tokens(display_name)
+        # A unique, at least four-letter first-name prefix covers Mica/Micaela.
+        # Any displayed surname must match a whole payer token.
+        if member_tokens and len(member_tokens[0]) >= 4 and payer_tokens[0].startswith(member_tokens[0]) and all(
+            token in payer_tokens[1:] for token in member_tokens[1:]
+        ):
+            matches.append(user_id)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _all_expenses(db: Session, home_group_id: int) -> tuple[list[Expense], dict[int, tuple[ImportLine | None, ImportBatch | None, MercadoPagoIntegration | None]]]:
@@ -559,6 +594,7 @@ def _mp_contribution_rows(db: Session, home_group_id: int, assignments: list[Fun
     lines = {item.id: item for item in db.scalars(select(ImportLine).where(ImportLine.id.in_(line_ids)))} if line_ids else {}
     integration_ids = {item.integration_id for item in assignments}
     integrations = {item.id: item for item in db.scalars(select(MercadoPagoIntegration).where(MercadoPagoIntegration.id.in_(integration_ids)))} if integration_ids else {}
+    rules = {(rule.integration_id, rule.stable_origin_id): rule.user_id for rule in db.scalars(select(FundMpOriginRule).where(FundMpOriginRule.home_group_id == home_group_id))}
     names = {item.id: item.display_name for item in db.scalars(select(User).join(Membership, Membership.user_id == User.id).where(Membership.home_group_id == home_group_id))}
     output = []
     for item in assignments:
@@ -575,18 +611,22 @@ def _mp_contribution_rows(db: Session, home_group_id: int, assignments: list[Fun
         payer_name = str(raw.get("PAYER_NAME") or "").strip() or None
         payer_document = str(raw.get("PAYER_ID_NUMBER") or "").strip()
         classification = "pending" if item.classification == "refund" else item.classification
+        remembered = bool(item.stable_origin_id and item.contributor_user_id is not None and rules.get((item.integration_id, item.stable_origin_id)) == item.contributor_user_id)
+        assignment_source = None
+        if classification == "contribution":
+            assignment_source = "manual" if item.updated_by_user_id is not None else "rule" if remembered else "payer_name"
         output.append({
             "assignment_id": item.id, "earning_id": earning.id, "date": earning.date.isoformat(), "description": earning.description,
             "amount_ars": str(money(earning.amount_ars)), "classification": classification,
             "contributor_user_id": item.contributor_user_id, "contributor_name": names.get(item.contributor_user_id),
-            "stable_origin_id": item.stable_origin_id, "can_remember_origin": bool(item.stable_origin_id),
+            "stable_origin_id": item.stable_origin_id, "can_remember_origin": bool(item.stable_origin_id) and not remembered,
             "payer_name": payer_name,
             "payer_document_suffix": payer_document[-4:] if payer_document else None,
             "payment_method_type": str(raw.get("PAYMENT_METHOD_TYPE") or "").strip() or None,
             "integration_id": item.integration_id,
             "account_user_id": integrations[item.integration_id].user_id if item.integration_id in integrations else None,
             "account_name": names.get(integrations[item.integration_id].user_id) if item.integration_id in integrations else None,
-            "assignment_source": "rule" if classification == "contribution" and item.updated_by_user_id is None else "manual" if classification == "contribution" else None,
+            "assignment_source": assignment_source,
             "legacy_refund": item.classification == "refund",
         })
     return sorted(output, key=lambda item: (item["date"], item["earning_id"]), reverse=True)

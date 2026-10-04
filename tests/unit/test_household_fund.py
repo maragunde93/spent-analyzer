@@ -1,4 +1,5 @@
 import sys
+import json
 import unittest
 from datetime import date
 from decimal import Decimal
@@ -27,6 +28,8 @@ from app.models import (
     MercadoPagoIntegration,
     User,
 )
+from app.api.fund import update_mp_contribution
+from app.schemas import FundMpContributionUpdate
 from app.services.fund import calculate_fund_summary
 
 
@@ -156,6 +159,45 @@ class HouseholdFundTests(unittest.TestCase):
         refreshed = calculate_fund_summary(self.db, self.home.id, "2026-06")
         self.assertEqual(refreshed["mp_contributions"][0]["stable_origin_id"], "payer_document:dni:test")
         self.assertTrue(refreshed["mp_contributions"][0]["can_remember_origin"])
+
+    def test_mp_payer_name_is_auto_classified_and_remembering_origin_updates_older_pending_income(self):
+        integration = MercadoPagoIntegration(home_group_id=self.home.id, user_id=self.mauro.id, access_token="secret", fund_role="fondo_comun")
+        self.db.add(integration)
+        self.db.flush()
+        batch = ImportBatch(home_group_id=self.home.id, uploaded_by_user_id=self.mauro.id, filename="mp.csv", source_type="mercadopago_account_money", status="committed")
+        self.db.add(batch)
+        self.db.flush()
+        for index, (description, payer_name, origin) in enumerate([
+            ("Varios", "MICAELA WENDY MOLTO ESPINOLA", "payer_document:cuil:mica"),
+            ("Otro ingreso", "", "payer_document:cuil:mica"),
+            ("Pago Debin", "", None),
+        ]):
+            line = ImportLine(import_batch_id=batch.id, home_group_id=self.home.id, date=date(2026, 6, index + 1), description=description, kind=ImportLineKind.income, currency=Currency.ARS, original_amount=Decimal("10000"), status="committed", fingerprint=f"income-{index}", raw_text=json.dumps({"PAYER_NAME": payer_name}), mercadopago_origin_id=origin)
+            self.db.add(line)
+            self.db.flush()
+            self.db.add(Earning(home_group_id=self.home.id, date=line.date, description=description, user_id=self.mauro.id, uploaded_by_user_id=self.mauro.id, currency=Currency.ARS, original_amount=Decimal("10000"), amount_ars=Decimal("10000"), import_line_id=line.id))
+        self.db.commit()
+
+        initial = calculate_fund_summary(self.db, self.home.id, "2026-06")
+        by_description = {row["description"]: row for row in initial["mp_contributions"]}
+        self.assertEqual(by_description["Varios"]["contributor_user_id"], self.mica.id)
+        self.assertEqual(by_description["Varios"]["assignment_source"], "payer_name")
+        self.assertEqual(by_description["Otro ingreso"]["classification"], "pending")
+        self.assertEqual(by_description["Pago Debin"]["classification"], "pending")
+
+        response = update_mp_contribution(self.home.id, by_description["Varios"]["earning_id"], FundMpContributionUpdate(classification="contribution", contributor_user_id=self.mica.id, remember_origin=True), self.mauro, self.db)
+        self.assertTrue(response["origin_remembered"])
+        updated = calculate_fund_summary(self.db, self.home.id, "2026-06")
+        by_description = {row["description"]: row for row in updated["mp_contributions"]}
+        self.assertEqual(by_description["Otro ingreso"]["contributor_user_id"], self.mica.id)
+        self.assertEqual(by_description["Otro ingreso"]["assignment_source"], "rule")
+        self.assertEqual(by_description["Varios"]["assignment_source"], "rule")
+        self.assertFalse(by_description["Varios"]["can_remember_origin"])
+        self.assertEqual(by_description["Pago Debin"]["classification"], "pending")
+
+        update_mp_contribution(self.home.id, by_description["Otro ingreso"]["earning_id"], FundMpContributionUpdate(classification="excluded", contributor_user_id=None), self.mauro, self.db)
+        manual = calculate_fund_summary(self.db, self.home.id, "2026-06")
+        self.assertEqual(next(row for row in manual["mp_contributions"] if row["description"] == "Otro ingreso")["classification"], "excluded")
 
     def test_personal_purchase_in_common_mp_account_requires_owner_repayment(self):
         integration = MercadoPagoIntegration(home_group_id=self.home.id, user_id=self.mauro.id, access_token="secret", fund_role="fondo_comun")

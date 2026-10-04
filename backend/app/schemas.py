@@ -96,6 +96,7 @@ class FundMpContributionUpdate(BaseModel):
 class MercadoPagoSyncRequest(BaseModel):
     start_date: Date | None = None
     end_date: Date | None = None
+    regenerate: bool = False
 
 
 class MercadoPagoSyncRead(BaseModel):

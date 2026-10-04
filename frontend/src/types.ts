@@ -69,7 +69,7 @@ export type FundMpIncome = {
   integration_id: number;
   account_user_id: number | null;
   account_name: string | null;
-  assignment_source: "manual" | "rule" | null;
+  assignment_source: "manual" | "rule" | "payer_name" | null;
   legacy_refund: boolean;
 };
 

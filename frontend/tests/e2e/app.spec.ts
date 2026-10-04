@@ -694,7 +694,7 @@ test("account import defaults to the logged user and restores edited description
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem("spent-analyzer:import-descriptions:1:777"))).toBeNull();
 });
 
-test("history import summary shows account statement coverage by month", async ({ page }) => {
+test("history import summary hides account statements until a payer is assigned", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Carga de Resumenes" }).click();
   await uploadLocalBankStatement(page);
@@ -702,9 +702,9 @@ test("history import summary shows account statement coverage by month", async (
   await page.getByRole("button", { name: "Historial" }).click();
   await page.getByRole("button", { name: "Resumen de importaciones" }).click();
   await expect(page.getByRole("heading", { name: "Cargas 2026" })).toBeVisible();
-  await expect(page.getByText("Statement cuenta")).toBeVisible();
-  await expect(page.getByRole("cell", { name: "Mauro" }).first()).toBeVisible();
-  await expect(page.getByText("Pendiente").first()).toBeVisible();
+  await expect(page.getByRole("rowheader", { name: "Mauro", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("img", { name: /^Cuenta: subido/ })).toHaveCount(0);
+  await expect(page.getByRole("rowheader", { name: "Sin pagador asignado" })).toHaveCount(0);
 });
 
 test("house settings allow creating, editing, and deleting subcategories without deleting associated expenses", async ({ page, request }) => {
@@ -775,7 +775,7 @@ test("user profile manages Mercado Pago integration with mocked API", async ({ p
   let syncStatus: string | null = null;
   let syncImported = 0;
   let syncCompletedAt: string | null = null;
-  let lastSyncRequestBody: { start_date?: string; end_date?: string } | null = null;
+  let lastSyncRequestBody: { start_date?: string; end_date?: string; regenerate?: boolean } | null = null;
   await page.route("**/households/1/mercadopago/integrations", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -836,7 +836,7 @@ test("user profile manages Mercado Pago integration with mocked API", async ({ p
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
   await page.route("**/households/1/mercadopago/integrations/1/sync", async (route) => {
-    const requestBody = route.request().postDataJSON() as { start_date?: string; end_date?: string } | null;
+    const requestBody = route.request().postDataJSON() as { start_date?: string; end_date?: string; regenerate?: boolean } | null;
     lastSyncRequestBody = requestBody;
     syncStatus = "running";
     syncImported = requestBody?.start_date ? 2 : 0;
@@ -880,7 +880,11 @@ test("user profile manages Mercado Pago integration with mocked API", async ({ p
   await expect(page.getByRole("button", { name: "Sincronizar rango" })).toBeDisabled();
   await page.getByLabel("Hasta Mercado Pago desde resumenes").fill("2026-08-22");
   await page.getByRole("button", { name: "Sincronizar rango" }).click();
-  expect(lastSyncRequestBody).toEqual({ start_date: "2026-08-20", end_date: "2026-08-22" });
+  expect(lastSyncRequestBody).toEqual({ start_date: "2026-08-20", end_date: "2026-08-22", regenerate: false });
+  await expect(page.getByRole("button", { name: "Sincronizar rango" })).toBeEnabled({ timeout: 5000 });
+  await page.getByRole("checkbox", { name: "Regenerar reporte aunque ya exista" }).check();
+  await page.getByRole("button", { name: "Sincronizar rango" }).click();
+  expect(lastSyncRequestBody).toEqual({ start_date: "2026-08-20", end_date: "2026-08-22", regenerate: true });
   await expect(page.getByRole("button", { name: "Sincronizar rango" })).toBeEnabled({ timeout: 5000 });
   await page.getByRole("button", { name: "Mauro" }).click();
   const defaultSyncDate = /^\d{4}-\d{2}-\d{2}$/;
@@ -891,6 +895,7 @@ test("user profile manages Mercado Pago integration with mocked API", async ({ p
   await page.getByLabel("Desde Mercado Pago").fill("2026-08-01");
   await page.getByLabel("Hasta Mercado Pago").fill("2026-08-31");
   await page.getByRole("button", { name: "Sincronizar rango" }).click();
+  expect(lastSyncRequestBody).toEqual({ start_date: "2026-08-01", end_date: "2026-08-31", regenerate: false });
   await expect(page.getByRole("button", { name: "Sincronizando rango" })).toBeVisible();
   await expect(page.getByText("Sync OK: 2 importados, 0 ignorados, 0 duplicados")).toBeVisible();
   page.once("dialog", async (dialog) => {

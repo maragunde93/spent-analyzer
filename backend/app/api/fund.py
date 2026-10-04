@@ -272,9 +272,11 @@ def update_mp_contribution(home_group_id: int, earning_id: int, payload: FundMpC
             db.add(FundMpOriginRule(home_group_id=home_group_id, integration_id=assignment.integration_id, stable_origin_id=assignment.stable_origin_id, user_id=assignment.contributor_user_id, created_by_user_id=user.id))
         else:
             rule.user_id = assignment.contributor_user_id
+        # This row now follows the same remembered rule as subsequent deposits.
+        assignment.updated_by_user_id = None
     log_action(db, home_group_id, user.id, "fund_mp_assign", "fund_mp_assignment", f"Ingreso MP clasificado como {payload.classification}", assignment.id)
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "origin_remembered": payload.remember_origin}
 
 
 @router.get("/mp-origin-rules")

@@ -74,7 +74,7 @@ export const api = {
         body: JSON.stringify({ access_token: accessToken, enabled: true })
       }
     ),
-  syncMercadoPago: (homeId: number, userId: number, payload?: { start_date?: string; end_date?: string }) =>
+  syncMercadoPago: (homeId: number, userId: number, payload?: { start_date?: string; end_date?: string; regenerate?: boolean }) =>
     request<MercadoPagoSyncAccepted>(
       `/households/${homeId}/mercadopago/integrations/${userId}/sync`,
       payload
