@@ -102,6 +102,25 @@ test("excess spending raises the financing base and shows a red warning", async 
   expect(summary.plan).toHaveLength(1);
   expect(summary.plan[0]).toMatchObject({ from_name: "Mica", to_name: "Mauro", amount: "1200000.00" });
   expect(summary.totals.agreed_balance).toBe("0.00");
+  await expect(page.locator(".fund-excess-explainer")).toContainText("El extra ya está incluido en «Debe cubrir»");
+  const mauro = page.locator(".fund-person").filter({ hasText: "Mauro" });
+  const mica = page.locator(".fund-person").filter({ hasText: "Mica" });
+  await expect(mauro.locator("dl div").filter({ hasText: "Cuota base" })).toContainText("3.040.000");
+  await expect(mauro.locator(".fund-excess-share")).toContainText("760.000");
+  await expect(mauro.locator(".fund-quota-total")).toContainText("3.800.000");
+  await expect(mica.locator("dl div").filter({ hasText: "Cuota base" })).toContainText("960.000");
+  await expect(mica.locator(".fund-excess-share")).toContainText("240.000");
+  await expect(mica.locator(".fund-quota-total")).toContainText("1.200.000");
+});
+
+test("an uneven excess is visibly apportioned by the current percentages", async ({ page, request }) => {
+  await seedFund(request);
+  await addSharedExpense(request, "4158223");
+  await openFund(page, "2026-06");
+
+  await expect(page.locator(".fund-metric.danger").filter({ hasText: "Exceso" })).toContainText("158.223");
+  await expect(page.locator(".fund-person").filter({ hasText: "Mauro" }).locator(".fund-excess-share")).toContainText("120.249");
+  await expect(page.locator(".fund-person").filter({ hasText: "Mica" }).locator(".fund-excess-share")).toContainText("37.974");
 });
 
 test("an over-budget month projects zero agreed balance but keeps the verified money", async ({ page, request }) => {
@@ -131,7 +150,7 @@ test("an over-budget month projects zero agreed balance but keeps the verified m
   await expect(page.locator(".fund-metric").filter({ hasText: "Saldo verificado" })).toContainText("3.900.000");
 });
 
-test("closing needs Mica's approval and carries the agreed balance without a real transfer", async ({ page, request }) => {
+test("Mica's approval records her reimbursement and fund deposit exactly once", async ({ page, request }) => {
   await seedFund(request);
   await addSharedExpense(request, "3500000");
   await openFund(page, "2026-06");
@@ -141,12 +160,34 @@ test("closing needs Mica's approval and carries the agreed balance without a rea
 
   const approved = await request.post(`${apiBase}/fund/months/2026-06/approve`, { headers: micaHeaders });
   expect(approved.ok()).toBeTruthy();
+  const settled = await fundSummary(request, "2026-06");
+  expect(settled.status).toBe("cerrado");
+  expect(settled.plan).toHaveLength(0);
+  expect(settled.totals.agreed_balance).toBe("500000.00");
+  expect(settled.totals.verified_balance).toBe("500000.00");
+  expect(settled.totals.difference).toBe("0.00");
+  const again = await request.post(`${apiBase}/fund/months/2026-06/approve`, { headers: micaHeaders });
+  expect(again.ok()).toBeTruthy();
+  expect((await fundSummary(request, "2026-06")).totals.verified_balance).toBe("500000.00");
   await page.getByLabel("Mes del fondo").fill("2026-07");
   await expect(page.locator(".fund-metric").filter({ hasText: "Saldo acordado" })).toContainText("4.500.000");
   const july = await fundSummary(request, "2026-07");
   expect(july.totals.agreed_opening_balance).toBe("500000.00");
-  expect(july.totals.verified_balance).toBe("0.00");
-  expect(july.totals.difference).toBe("-4500000.00");
+  expect(july.totals.verified_balance).toBe("500000.00");
+  expect(july.totals.difference).toBe("-4000000.00");
+});
+
+test("the closing button records only the signed-in member's pending transfers", async ({ page, request }) => {
+  await seedFund(request);
+  await openFund(page, "2026-06");
+  await clickInViewport(page.getByRole("button", { name: /Aceptar y registrar mi parte/ }));
+  await expect(page.getByText("Mauro: aceptado")).toBeVisible();
+  await expect(page.locator(".fund-movement-panel")).toContainText("Registrado al aceptar el cierre de 2026-06");
+  const partial = await fundSummary(request, "2026-06");
+  expect(partial.status).toBe("pendiente_aprobacion");
+  expect(partial.totals.verified_balance).toBe("3040000.00");
+  expect(partial.plan).toEqual([{ from_user_id: 2, from_name: "Mica", to_kind: "fund", to_user_id: null, to_name: "Fondo común", amount: "960000.00" }]);
+  await expect(page.getByText("Mica: pendiente")).toBeVisible();
 });
 
 test("changed expenses mark a closure stale until it is reopened and recalculated", async ({ page, request }) => {

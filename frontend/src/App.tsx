@@ -3417,20 +3417,33 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
         <FundMetric label="Gastos compartidos" value={totals.shared_expenses} help="Suma de consumos marcados como compartidos asignados a este período." />
         <FundMetric label={Number(totals.surplus_or_excess) >= 0 ? "Sobrante" : "Exceso"} value={Math.abs(Number(totals.surplus_or_excess))} danger={Number(totals.surplus_or_excess) < 0} help="Diferencia entre el fondo mensual y los gastos compartidos. Un exceso aumenta la base a financiar." />
         <FundMetric label="Saldo acordado" value={totals.agreed_balance} help="Saldo que debería quedar después de cumplir el cierre acordado, aunque las transferencias aún no estén verificadas." />
-        <FundMetric label="Saldo verificado" value={totals.verified_balance} help="Dinero respaldado por el saldo inicial y movimientos reales registrados o importados." />
+        <FundMetric label="Saldo verificado" value={totals.verified_balance} help="Saldo respaldado por el inicial y por movimientos registrados o importados. Aceptar un cierre registra contablemente las transferencias del plan para quien acepta; no verifica una operación bancaria." />
         <FundMetric label="Diferencia" value={totals.difference} danger={Math.abs(Number(totals.difference)) > .01} help="Diferencia entre el saldo real verificado y el saldo acordado. Indica movimientos pendientes de conciliar." />
       </div>
 
+      {Number(totals.surplus_or_excess) < 0 && <p className="fund-excess-explainer">El exceso de {money(Math.abs(Number(totals.surplus_or_excess)))} se reparte con los porcentajes actuales. El extra ya está incluido en «Debe cubrir»; «Pendiente» también descuenta lo adelantado y aportado.</p>}
       <div className="fund-positions">
-        {data.positions?.map((position) => <article className="panel fund-person" key={position.user_id}><div><strong>{position.display_name}</strong><span>{economicNumber(position.percentage)}%</span><HelpHint text="Resume cuánto le corresponde cubrir a esta persona, cuánto adelantó o aportó y qué importe todavía debe pagar o recibir." /></div><dl><div><dt>Debe cubrir</dt><dd>{money(position.quota)}</dd></div><div><dt>Adelantó</dt><dd>{money(position.direct_paid)}</dd></div><div><dt>Aportes / reintegros</dt><dd>{money(position.contributed)}</dd></div><div><dt>{Number(position.outstanding) >= 0 ? "Pendiente" : "A recibir"}</dt><dd>{money(Math.abs(Number(position.outstanding)))}</dd></div></dl></article>)}
+        {data.positions?.map((position) => <article className="panel fund-person" key={position.user_id}>
+          <div><strong>{position.display_name}</strong><span>{economicNumber(position.percentage)}%</span><HelpHint text="La cuota base aplica el porcentaje al fondo mensual. Si hubo exceso, ese mismo porcentaje se aplica al gasto adicional. Debe cubrir suma ambos importes; Pendiente o A recibir descuenta lo ya adelantado y aportado." /></div>
+          <dl>
+            {Number(totals.surplus_or_excess) < 0 && <>
+              <div><dt>Cuota base</dt><dd>{money(position.base_quota)}</dd></div>
+              <div className="fund-excess-share"><dt>Extra por exceso</dt><dd>{money(position.extra_quota)}</dd></div>
+            </>}
+            <div className={Number(totals.surplus_or_excess) < 0 ? "fund-quota-total" : undefined}><dt>Debe cubrir</dt><dd>{money(position.quota)}</dd></div>
+            <div><dt>Adelantó</dt><dd>{money(position.direct_paid)}</dd></div>
+            <div><dt>Aportes / reintegros</dt><dd>{money(position.contributed)}</dd></div>
+            <div><dt>{Number(position.outstanding) >= 0 ? "Pendiente" : "A recibir"}</dt><dd>{money(Math.abs(Number(position.outstanding)))}</dd></div>
+          </dl>
+        </article>)}
       </div>
 
       <div className="panel fund-plan">
-        <div className="fund-section-heading"><div><span className="eyebrow">Plan automático</span><h2>Para cerrar {monthLabel(period)}</h2></div><HelpHint text="Distribuye primero reintegros entre personas y luego indica cuánto debe quedar en el fondo. Aceptar sólo guarda el acuerdo: no realiza transferencias." /></div>
+        <div className="fund-section-heading"><div><span className="eyebrow">Plan automático</span><h2>Para cerrar {monthLabel(period)}</h2></div><HelpHint text="Distribuye primero reintegros entre personas y luego indica cuánto debe quedar en el fondo. Al aceptar tu parte se registran sus movimientos con fecha contable del último día del mes. No se ejecutan transferencias bancarias. Si Mercado Pago importa después ese mismo depósito, revisá la posible duplicación." /></div>
         {data.plan?.length ? <div className="fund-plan-list">{data.plan.map((item, index) => <div key={`${item.from_user_id}-${item.to_user_id}-${index}`}><span>{item.from_name} <strong>→</strong> {item.to_name}{item.reason === "personal_mp_outflow" && <small className="fund-plan-reason">Reponer compra personal de la cuenta MP del fondo</small>}</span><strong>{money(item.amount)}</strong></div>)}</div> : <p className="muted">No quedan transferencias pendientes para este cierre.</p>}
-        {ownObligation > 0 && <p className="fund-own-callout">Te corresponde completar {money(ownObligation)}. Aceptar guarda el acuerdo; no ejecuta transferencias.</p>}
+        {ownObligation > 0 && <p className="fund-own-callout">Te corresponde completar {money(ownObligation)} según el desglose de arriba. Al aceptar, esos movimientos quedarán registrados como realizados en este mes; el botón no envía dinero.</p>}
         <div className="fund-close-actions">
-          {data.status === "desactualizado" ? <button className="primary" disabled={reopen.isPending} onClick={() => reopen.mutate()}>Reabrir y recalcular</button> : canCloseOrApprove ? <button className="primary" disabled={closeOrApprove.isPending} onClick={() => closeOrApprove.mutate()}>{closeOrApprove.isPending ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} {ownObligation > 0 ? `Aceptar mi parte y cerrar ${monthLabel(period)}` : `Calcular cierre de ${monthLabel(period)}`}</button> : <span className="status">{data.status === "cerrado" ? "Cierre aceptado" : "Esperando las demás aprobaciones"}</span>}
+          {data.status === "desactualizado" ? <button className="primary" disabled={reopen.isPending} onClick={() => reopen.mutate()}>Reabrir y recalcular</button> : canCloseOrApprove ? <button className="primary" disabled={closeOrApprove.isPending} onClick={() => closeOrApprove.mutate()}>{closeOrApprove.isPending ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} {ownObligation > 0 ? `Aceptar y registrar mi parte de ${monthLabel(period)}` : `Calcular cierre de ${monthLabel(period)}`}</button> : <span className="status">{data.status === "cerrado" ? "Cierre aceptado" : "Esperando las demás aprobaciones"}</span>}
           {data.approvals?.map((item) => <span className={item.approved ? "status" : "status warning-status"} key={item.user_id}>{item.display_name}: {item.approved ? "aceptado" : "pendiente"}</span>)}
         </div>
       </div>

@@ -68,7 +68,13 @@ async def upload_bbva_visa(
     batch.fx_rate_ars_per_usd = _fx_rate_for_import_date(db, batch.created_at.date() if batch.created_at else date.today())
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
+    fingerprint_occurrences: dict[str, int] = {}
     for line in parsed.lines:
+        occurrence = fingerprint_occurrences.get(line.fingerprint, 0) + 1
+        fingerprint_occurrences[line.fingerprint] = occurrence
+        # Statements can contain identical charges followed by a reversal.
+        # Preserve every row and the legacy fingerprint for its first occurrence.
+        unique_fingerprint = line.fingerprint if occurrence == 1 else f"{line.fingerprint}:{occurrence}"
         suggested_category_id, suggested_subcategory_id, suggested_recurring, suggested_shared = _suggest_import_line(
             db,
             home_group_id,
@@ -91,7 +97,7 @@ async def upload_bbva_visa(
                 suggested_subcategory_id=suggested_subcategory_id,
                 suggested_recurring=suggested_recurring,
                 suggested_shared=suggested_shared or _is_mauro_name(line.cardholder_name) and parsed.card_network == "mastercard",
-                fingerprint=f"{batch.id}:{line.fingerprint}",
+                fingerprint=f"{batch.id}:{unique_fingerprint}",
                 raw_text=line.raw_text,
             )
         )

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from fastapi import HTTPException
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -28,7 +29,7 @@ from app.models import (
     MercadoPagoIntegration,
     User,
 )
-from app.api.fund import update_mp_contribution
+from app.api.fund import approve_month, close_month, update_mp_contribution
 from app.schemas import FundMpContributionUpdate
 from app.services.fund import calculate_fund_summary
 
@@ -99,14 +100,68 @@ class HouseholdFundTests(unittest.TestCase):
         self.assertEqual(result["plan"][0]["to_name"], "Mauro")
         self.assertEqual(result["totals"]["agreed_balance"], "0.00")
 
+    def test_each_approval_records_only_own_fund_transfers_once(self):
+        closed = close_month(self.home.id, "2026-06", self.mauro, self.db)
+        self.assertEqual(closed["status"], "pendiente_aprobacion")
+        self.assertEqual(self.db.query(FundManualMovement).count(), 0)
+
+        mauro_approved = approve_month(self.home.id, "2026-06", self.mauro, self.db)
+        self.assertEqual(mauro_approved["status"], "pendiente_aprobacion")
+        self.assertEqual(mauro_approved["totals"]["verified_balance"], "3040000.00")
+        self.assertEqual(mauro_approved["totals"]["difference"], "-960000.00")
+        self.assertEqual([(row["from_name"], row["amount"]) for row in mauro_approved["plan"]], [("Mica", "960000.00")])
+        self.assertEqual(self.db.query(FundManualMovement).count(), 1)
+
+        approve_month(self.home.id, "2026-06", self.mauro, self.db)
+        self.assertEqual(self.db.query(FundManualMovement).count(), 1)
+        mica_approved = approve_month(self.home.id, "2026-06", self.mica, self.db)
+        self.assertEqual(mica_approved["status"], "cerrado")
+        self.assertEqual(mica_approved["plan"], [])
+        self.assertEqual(mica_approved["totals"]["agreed_balance"], "4000000.00")
+        self.assertEqual(mica_approved["totals"]["verified_balance"], "4000000.00")
+        self.assertEqual(mica_approved["totals"]["difference"], "0.00")
+        self.assertEqual({movement.date for movement in self.db.query(FundManualMovement)}, {date(2026, 6, 30)})
+
+    def test_approval_registers_reimbursement_to_person_and_remainder_to_fund(self):
+        self._expense("3500000")
+        close_month(self.home.id, "2026-06", self.mauro, self.db)
+        approved = approve_month(self.home.id, "2026-06", self.mica, self.db)
+        transfers = {(movement.to_user_id, Decimal(movement.amount)) for movement in self.db.query(FundManualMovement)}
+        self.assertEqual(transfers, {(None, Decimal("500000")), (self.mauro.id, Decimal("460000"))})
+        self.assertEqual(approved["plan"], [])
+        self.assertEqual(approved["totals"]["agreed_balance"], "500000.00")
+        self.assertEqual(approved["totals"]["verified_balance"], "500000.00")
+        self.assertEqual(approved["totals"]["difference"], "0.00")
+
+    def test_stale_plan_cannot_be_approved_or_registered(self):
+        close_month(self.home.id, "2026-06", self.mauro, self.db)
+        self._expense("1000")
+        with self.assertRaises(HTTPException) as error:
+            approve_month(self.home.id, "2026-06", self.mauro, self.db)
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(self.db.query(FundManualMovement).count(), 0)
+
     def test_config_is_inherited_and_excess_uses_the_same_percentages(self):
         self._expense("5000000", expense_date=date(2026, 7, 8))
         result = calculate_fund_summary(self.db, self.home.id, "2026-07")
 
         self.assertTrue(result["config"]["inherited"])
         self.assertEqual(result["totals"]["financing_base"], "5000000.00")
-        self.assertEqual(next(item for item in result["positions"] if item["user_id"] == self.mauro.id)["quota"], "3800000.00")
+        mauro = next(item for item in result["positions"] if item["user_id"] == self.mauro.id)
+        mica = next(item for item in result["positions"] if item["user_id"] == self.mica.id)
+        self.assertEqual((mauro["base_quota"], mauro["extra_quota"], mauro["quota"]), ("3040000.00", "760000.00", "3800000.00"))
+        self.assertEqual((mica["base_quota"], mica["extra_quota"], mica["quota"]), ("960000.00", "240000.00", "1200000.00"))
         self.assertIn("Los gastos superan el fondo configurado por ARS 1.000.000.", result["alerts"])
+
+    def test_excess_breakdown_matches_percentages_and_total_with_cents(self):
+        self._expense("4158223")
+        result = calculate_fund_summary(self.db, self.home.id, "2026-06")
+        mauro = next(item for item in result["positions"] if item["user_id"] == self.mauro.id)
+        mica = next(item for item in result["positions"] if item["user_id"] == self.mica.id)
+
+        self.assertEqual((mauro["base_quota"], mauro["extra_quota"], mauro["quota"]), ("3040000.00", "120249.48", "3160249.48"))
+        self.assertEqual((mica["base_quota"], mica["extra_quota"], mica["quota"]), ("960000.00", "37973.52", "997973.52"))
+        self.assertEqual(Decimal(mauro["extra_quota"]) + Decimal(mica["extra_quota"]), Decimal("158223.00"))
 
     def test_excess_zeroes_agreed_balance_without_rewriting_verified_balance(self):
         opening = self.db.query(FundOpeningBalance).filter_by(home_group_id=self.home.id).one()

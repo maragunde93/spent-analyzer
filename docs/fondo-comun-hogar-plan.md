@@ -76,11 +76,11 @@ Después del cierre:
 [ Aceptar y cerrar junio ]
 ```
 
-El botón acepta el cálculo y cierra el mes. No ejecuta transferencias ni afirma que fueron verificadas.
+El botón de aceptación registra contablemente como realizados los movimientos del plan que corresponden al integrante que acepta, con fecha del último día del mes. No ejecuta transferencias bancarias. Cada integrante acepta y registra sólo su propia parte; los demás movimientos esperan su aprobación.
 
 - El cierre guarda una fotografía del fondo, gastos, porcentajes, posiciones e instrucciones.
 - El saldo acordado se arrastra como base principal del mes siguiente.
-- El saldo verificado se alimenta con el saldo inicial, Mercado Pago y movimientos reales registrados manualmente.
+- El saldo verificado se alimenta con el saldo inicial, Mercado Pago y movimientos registrados, incluidos los asentados al aceptar el cierre. La aceptación no verifica un comprobante bancario.
 - La diferencia entre ambos se muestra como pendiente de conciliación, pero no bloquea el mes siguiente.
 - Si después del cierre cambia un consumo, una asignación MP o la configuración utilizada, el mes queda marcado como `Cierre desactualizado`. No debe recalcularse silenciosamente.
 - El usuario puede reabrir, recalcular y volver a aceptar el cierre, conservando auditoría.
@@ -146,7 +146,7 @@ Permitir registrar fecha, importe y nota, eligiendo origen y destino:
 
 Un movimiento persona → persona redistribuye quién soportó el gasto y no cambia el saldo del fondo. Un movimiento persona → fondo sí incrementa el saldo verificado.
 
-Aceptar un cierre no crea automáticamente estos movimientos reales; solo guarda el acuerdo mensual.
+Aceptar un cierre crea automáticamente los movimientos pendientes del integrante que acepta, según el plan congelado para ese cierre. Se registran una sola vez aunque el botón o la API se repitan. Los movimientos de integrantes que aún no aceptaron no se crean.
 
 ## Mercado Pago
 
@@ -266,7 +266,7 @@ Extender la API de Mercado Pago para exponer y actualizar `fund_role` sin expone
 
 - El usuario puede entender cuánto debe aportar cada persona sin hacer cálculos manuales.
 - En el caso de ARS 3,5 M pagados por Mauro, Mica ve exactamente las dos acciones de ARS 460k y ARS 500k y solo debe aceptar el cierre.
-- El mes siguiente toma ARS 500k como saldo acordado aunque la transferencia todavía no esté verificada.
+- Tras aceptar Mica, sus dos movimientos quedan registrados en el último día del mes; el saldo acordado y el registrado son ARS 500k y el cierre no ejecuta transferencias bancarias.
 - La pantalla nunca presenta un reintegro personal como dinero adicional del fondo.
 - El titular de una cuenta MP común no recibe crédito por las compras realizadas desde ella.
 - Los datos financieros actuales permanecen intactos y siguen editándose desde sus pantallas originales.

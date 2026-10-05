@@ -1724,6 +1724,9 @@ button.person-action-control:disabled {
 .fund-person dl div { align-items: center; display: flex; justify-content: space-between; }
 .fund-person dt { color: #94a3b8; }
 .fund-person dd { font-weight: 800; margin: 0; }
+.fund-excess-explainer { color: #cbd5e1; margin: 0; }
+.fund-person dl .fund-excess-share dt, .fund-person dl .fund-excess-share dd { color: #fca5a5; }
+.fund-person dl .fund-quota-total { border-top: 1px solid #334155; padding-top: 10px; }
 .fund-plan { border-color: #256b8d; }
 .fund-plan-list { display: grid; gap: 8px; margin: 18px 0; }
 .fund-plan-list > div { align-items: center; background: #0a1220; border: 1px solid #1e293b; border-radius: 8px; display: flex; justify-content: space-between; padding: 13px 14px; }

@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,7 +21,7 @@ from app.models import (
 )
 from app.schemas import FundConfigUpdate, FundManualMovementInput, FundMpContributionUpdate, FundOpeningBalanceUpdate
 from app.services.audit import log_action
-from app.services.fund import calculate_fund_summary, household_members, money, mp_activity, validate_period
+from app.services.fund import calculate_fund_summary, household_members, money, mp_activity, period_end, validate_period
 
 router = APIRouter(prefix="/households/{home_group_id}/fund", tags=["fund"])
 
@@ -147,16 +147,43 @@ def approve_month(
     closure = db.scalar(select(FundMonthClosure).where(FundMonthClosure.home_group_id == home_group_id, FundMonthClosure.period == validate_period(period)))
     if closure is None or closure.status not in ("pendiente_aprobacion", "cerrado"):
         raise HTTPException(status_code=409, detail="Primero calculá el cierre del mes")
+    current = calculate_fund_summary(db, home_group_id, period, persist_stale=False)
+    if current["status"] == "desactualizado":
+        raise HTTPException(status_code=409, detail="Reabrí el cierre desactualizado antes de aceptarlo")
     outgoing = sum((Decimal(item["amount"]) for item in closure.snapshot.get("plan", []) if item["from_user_id"] == user.id), Decimal("0"))
     obligated = {item["from_user_id"] for item in closure.snapshot.get("plan", []) if Decimal(item["amount"]) > 0}
     if user.id not in obligated:
         raise HTTPException(status_code=403, detail="No tenés una obligación de salida para aprobar")
     approval = db.scalar(select(FundClosureApproval).where(FundClosureApproval.closure_id == closure.id, FundClosureApproval.user_id == user.id))
     if approval is None:
+        # The approval records only this member's outstanding plan rows. Both
+        # inserts and approval commit together, so a failed/retried request
+        # cannot leave a partially recorded settlement.
+        accounting_date = period_end(period) - timedelta(days=1)
+        for row in closure.snapshot.get("plan", []):
+            if row["from_user_id"] != user.id or Decimal(row["amount"]) <= 0:
+                continue
+            movement = FundManualMovement(
+                home_group_id=home_group_id,
+                date=accounting_date,
+                from_user_id=user.id,
+                to_user_id=row["to_user_id"],
+                amount=money(row["amount"]),
+                note=f"Registrado al aceptar el cierre de {period}",
+                created_by_user_id=user.id,
+            )
+            db.add(movement)
+            db.flush()
+            log_action(db, home_group_id, user.id, "fund_movement_create", "fund_manual_movement", movement.note, movement.id, money(movement.amount))
         approval = FundClosureApproval(closure_id=closure.id, user_id=user.id, amount=money(outgoing))
         db.add(approval)
         db.flush()
-        log_action(db, home_group_id, user.id, "fund_month_approve", "fund_month_closure", f"Parte aprobada para {period}", closure.id, money(outgoing))
+        updated = calculate_fund_summary(db, home_group_id, period, persist_stale=False)
+        if money(updated["totals"]["agreed_balance"]) != money(closure.agreed_closing_balance):
+            db.rollback()
+            raise HTTPException(status_code=409, detail="El saldo acordado cambió al registrar el cierre; reabrí y recalculá")
+        closure.input_hash = updated["input_hash"]
+        log_action(db, home_group_id, user.id, "fund_month_approve", "fund_month_closure", f"Parte aprobada y movimientos registrados para {period}", closure.id, money(outgoing))
     approved_ids = set(db.scalars(select(FundClosureApproval.user_id).where(FundClosureApproval.closure_id == closure.id)))
     closure.status = "cerrado" if obligated <= approved_ids else "pendiente_aprobacion"
     closure.updated_at = datetime.utcnow()
