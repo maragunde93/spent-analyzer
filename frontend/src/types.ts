@@ -116,6 +116,8 @@ export type FundSummary = {
     display_name: string;
     percentage: string;
     quota: string;
+    base_quota: string;
+    extra_quota: string;
     direct_paid: string;
     contributed: string;
     personal_outflow: string;
