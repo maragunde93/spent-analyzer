@@ -12,7 +12,7 @@ from app.domain import Currency, ExpenseSource
 from app.models import Category, Expense, FxRate, ImportBatch, ImportLine, RecurringRule, Subcategory, User
 from app.schemas import DashboardSummary
 from app.services.recurring import recurring_display_name, recurring_identity
-from app.services.statement_period import infer_card_statement_period, parse_card_due_date
+from app.services.statement_period import expense_reporting_period, infer_card_statement_period, parse_card_due_date
 
 router = APIRouter(prefix="/households/{home_group_id}/dashboard", tags=["dashboard"])
 
@@ -42,6 +42,18 @@ def dashboard(
     if is_shared is not None:
         stmt = stmt.where(Expense.is_shared.is_(is_shared))
     expenses = [expense for expense in db.scalars(stmt) if not _is_non_consumption_expense(expense)]
+    card_line_ids = [expense.import_line_id for expense in expenses if expense.source == ExpenseSource.import_pdf and expense.import_line_id is not None]
+    card_period_by_line = {line_id: period for line_id, period in db.execute(
+        select(ImportLine.id, ImportBatch.statement_period)
+        .join(ImportBatch, ImportBatch.id == ImportLine.import_batch_id)
+        .where(ImportLine.id.in_(card_line_ids), ImportBatch.home_group_id == home_group_id)
+    )} if card_line_ids else {}
+    reporting_periods = {
+        expense.id: expense_reporting_period(
+            expense.date, expense.source, card_period_by_line.get(expense.import_line_id)
+        )[0]
+        for expense in expenses
+    }
     category_rows = list(db.scalars(select(Category).where(Category.home_group_id == home_group_id)))
     categories = {c.id: c.name for c in category_rows}
     subcategories = {
@@ -59,7 +71,7 @@ def dashboard(
         category = categories.get(expense.category_id, "Sin categoria")
         by_category[category] = by_category.get(category, Decimal("0")) + Decimal(expense.amount_ars)
         by_user[expense.paid_by_user_id] = by_user.get(expense.paid_by_user_id, Decimal("0")) + Decimal(expense.amount_ars)
-        month = expense.date.strftime("%Y-%m")
+        month = reporting_periods[expense.id]
         trend[month] = trend.get(month, Decimal("0")) + Decimal(expense.amount_ars)
         monthly_by_category.setdefault(month, {})
         monthly_by_category[month][category] = monthly_by_category[month].get(category, Decimal("0")) + Decimal(expense.amount_ars)

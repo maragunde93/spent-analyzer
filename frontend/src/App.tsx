@@ -168,6 +168,12 @@ function currentDateInputValue(now = new Date()) {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
+function periodEndDate(period: string) {
+  const [year, month] = period.split("-").map(Number);
+  const day = new Date(year, month, 0).getDate();
+  return `${period}-${String(day).padStart(2, "0")}`;
+}
+
 function spreadsheetXmlValue(value: unknown) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -604,11 +610,25 @@ function sameStringArray(left: string[], right: string[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+type ExpenseColumnFilters = {
+  category: string;
+  source: "all" | ExpenseSource;
+  recurring: "all" | "yes" | "no";
+  dateFrom: string;
+  dateTo: string;
+};
+
+const defaultExpenseColumnFilters: ExpenseColumnFilters = {
+  category: "all", source: "all", recurring: "all", dateFrom: "", dateTo: ""
+};
+const expenseSources: ExpenseSource[] = ["manual", "import_pdf", "bank_import", "mercadopago", "cash", "transfer", "other"];
+
 export function App() {
   const [section, setSection] = useState("dashboard");
   const [query, setQuery] = useState("");
   const [paidBy, setPaidBy] = useState("all");
   const [expenseCurrency, setExpenseCurrency] = useState<"all" | Currency>("all");
+  const [expenseColumnFilters, setExpenseColumnFilters] = useState(defaultExpenseColumnFilters);
   const [sharedScope, setSharedScope] = useState<SharedScope>("all");
   const [dashboardCategoryIds, setDashboardCategoryIds] = useState<number[]>([]);
   const queryClient = useQueryClient();
@@ -671,18 +691,28 @@ export function App() {
   });
 
   const filteredExpenses = useMemo(() => {
+    const search = query.trim().toLowerCase();
+    const uncategorizedIds = new Set(cats.filter((category) => category.name.toLowerCase() === "sin categoria").map((category) => category.id));
     return (expenses.data ?? []).filter((expense) => {
-      const category = cats.find((cat) => cat.id === expense.category_id);
-      const subcategory = category?.subcategories?.find((item) => item.id === expense.subcategory_id);
-      const categoryName = category?.name ?? "Sin categoria";
-      const haystack = `${expense.description} ${categoryName} ${subcategory?.name ?? ""}`.toLowerCase();
-      const matchesText = haystack.includes(query.toLowerCase());
+      const matchesText = !search || [
+        expense.description, expense.notes ?? "",
+        ...[expense.original_amount, expense.amount_ars].flatMap((amount) => [amount, String(Number(amount)), numberFormat(amount)]),
+        money(expense.original_amount, expense.currency), money(expense.amount_ars, "ARS")
+      ].some((field) => field.toLowerCase().includes(search));
       const matchesUser = paidBy === "all" || String(expense.paid_by_user_id) === paidBy;
       const matchesCurrency = expenseCurrency === "all" || expense.currency === expenseCurrency;
       const matchesShared = sharedScope === "all" || expense.is_shared === (sharedScope === "shared");
-      return matchesText && matchesUser && matchesCurrency && matchesShared;
+      const matchesCategory = expenseColumnFilters.category === "all"
+        || (expenseColumnFilters.category === "uncategorized"
+          ? expense.category_id === null || uncategorizedIds.has(expense.category_id)
+          : String(expense.category_id) === expenseColumnFilters.category);
+      const matchesSource = expenseColumnFilters.source === "all" || expense.source === expenseColumnFilters.source;
+      const matchesRecurring = expenseColumnFilters.recurring === "all" || !!expense.is_recurring === (expenseColumnFilters.recurring === "yes");
+      const matchesDate = (!expenseColumnFilters.dateFrom || expense.date >= expenseColumnFilters.dateFrom)
+        && (!expenseColumnFilters.dateTo || expense.date <= expenseColumnFilters.dateTo);
+      return matchesText && matchesUser && matchesCurrency && matchesShared && matchesCategory && matchesSource && matchesRecurring && matchesDate;
     });
-  }, [expenses.data, cats, query, paidBy, expenseCurrency, sharedScope]);
+  }, [expenses.data, cats, query, paidBy, expenseCurrency, sharedScope, expenseColumnFilters]);
 
   if (currentUser.isLoading) return <LoadingScreen />;
   if (currentUser.isError || !currentUser.data) return <LoginScreen />;
@@ -762,6 +792,8 @@ export function App() {
             sharedScope={sharedScope}
             setSharedScope={setSharedScope}
             setQuery={setQuery}
+            columnFilters={expenseColumnFilters}
+            setColumnFilters={setExpenseColumnFilters}
           />
         )}
         {section === "imports" && <Imports categories={cats} users={people} currentUser={authenticatedUser} homeId={homeId} />}
@@ -1255,6 +1287,7 @@ function Dashboard({
     <section className="grid dashboard-grid">
       <div className="panel dashboard-filters wide">
         <h2>Filtros</h2>
+        <p className="muted">En los gráficos, las compras de tarjeta se muestran en el mes del resumen; los demás consumos, en el mes de su fecha.</p>
         <div className="filter-summary-row">
           <label>
             <span>Vista</span>
@@ -1844,6 +1877,8 @@ function Expenses(props: {
   paidBy: string;
   currencyFilter: "all" | Currency;
   sharedScope: SharedScope;
+  columnFilters: ExpenseColumnFilters;
+  setColumnFilters: (value: ExpenseColumnFilters) => void;
   setQuery: (value: string) => void;
   setPaidBy: (value: string) => void;
   setCurrencyFilter: (value: "all" | Currency) => void;
@@ -1879,8 +1914,10 @@ function Expenses(props: {
   const groupedExpenses = groupExpensesByMonth(props.expenses);
   const visibleTotals = totalsByCurrency(props.expenses);
   const periods = Object.keys(groupedExpenses).sort().reverse();
-  const hasActiveFilters = !!props.query.trim() || props.paidBy !== "all" || props.currencyFilter !== "all" || props.sharedScope !== "all";
-  const activeFilterKey = `${props.query.trim().toLowerCase()}|${props.paidBy}|${props.currencyFilter}|${props.sharedScope}`;
+  const hasColumnFilters = props.columnFilters.category !== "all" || props.columnFilters.source !== "all"
+    || props.columnFilters.recurring !== "all" || !!props.columnFilters.dateFrom || !!props.columnFilters.dateTo;
+  const hasActiveFilters = !!props.query.trim() || props.paidBy !== "all" || props.currencyFilter !== "all" || props.sharedScope !== "all" || hasColumnFilters;
+  const activeFilterKey = JSON.stringify([props.query.trim().toLowerCase(), props.paidBy, props.currencyFilter, props.sharedScope, props.columnFilters]);
   const periodKey = periods.join("|");
   const previousFilterKey = useRef(activeFilterKey);
   useEffect(() => {
@@ -1934,6 +1971,7 @@ function Expenses(props: {
               <Search size={16} />
               <input value={props.query} onChange={(e) => props.setQuery(e.target.value)} placeholder="Buscar gasto" aria-label="Buscar gasto" />
             </label>
+            <small className="muted">Buscar por descripcion, importe o notas.</small>
             <label>
               <span>Pagado por</span>
               <select value={props.paidBy} onChange={(e) => props.setPaidBy(e.target.value)} aria-label="Filtrar por usuario">
@@ -1942,21 +1980,69 @@ function Expenses(props: {
               </select>
             </label>
             <label>
-              <span>Moneda</span>
-              <select value={props.currencyFilter} onChange={(e) => props.setCurrencyFilter(e.target.value as "all" | Currency)} aria-label="Filtrar por moneda">
+              <span>Categoria</span>
+              <select aria-label="Filtrar por categoria" value={props.columnFilters.category}
+                onChange={(event) => props.setColumnFilters({ ...props.columnFilters, category: event.target.value })}>
                 <option value="all">Todas</option>
-                <option value="ARS">ARS</option>
-                <option value="USD">USD</option>
+                <option value="uncategorized">Sin categoria</option>
+                {props.categories.filter((category) => category.name.toLowerCase() !== "sin categoria")
+                  .map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
               </select>
             </label>
             <label>
-              <span>Alcance</span>
-              <select value={props.sharedScope} onChange={(e) => props.setSharedScope(e.target.value as SharedScope)} aria-label="Filtrar gastos por alcance">
+              <span>Origen</span>
+              <select aria-label="Filtrar por origen" value={props.columnFilters.source}
+                onChange={(event) => props.setColumnFilters({ ...props.columnFilters, source: event.target.value as ExpenseColumnFilters["source"] })}>
                 <option value="all">Todos</option>
-                <option value="shared">Compartidos</option>
-                <option value="personal">Personales</option>
+                {expenseSources.map((source) => <option key={source} value={source}>{sourceLabel(source)}</option>)}
               </select>
             </label>
+            <label>
+              <span>Recurrente</span>
+              <select aria-label="Filtrar por recurrente" value={props.columnFilters.recurring}
+                onChange={(event) => props.setColumnFilters({ ...props.columnFilters, recurring: event.target.value as ExpenseColumnFilters["recurring"] })}>
+                <option value="all">Todos</option>
+                <option value="yes">Si</option>
+                <option value="no">No</option>
+              </select>
+            </label>
+            <div className="expense-filter-grid">
+              <label>
+                <span>Moneda</span>
+                <select value={props.currencyFilter} onChange={(e) => props.setCurrencyFilter(e.target.value as "all" | Currency)} aria-label="Filtrar por moneda">
+                  <option value="all">Todas</option>
+                  <option value="ARS">ARS</option>
+                  <option value="USD">USD</option>
+                </select>
+              </label>
+              <label>
+                <span>Alcance</span>
+                <select value={props.sharedScope} onChange={(e) => props.setSharedScope(e.target.value as SharedScope)} aria-label="Filtrar gastos por alcance">
+                  <option value="all">Todos</option>
+                  <option value="shared">Compartidos</option>
+                  <option value="personal">Personales</option>
+                </select>
+              </label>
+            </div>
+            <div className="expense-filter-grid">
+              <label>
+                <span>Fecha desde</span>
+                <input type="date" aria-label="Filtrar fecha desde" value={props.columnFilters.dateFrom} max={props.columnFilters.dateTo || undefined}
+                  onChange={(event) => props.setColumnFilters({ ...props.columnFilters, dateFrom: event.target.value })} />
+              </label>
+              <label>
+                <span>Fecha hasta</span>
+                <input type="date" aria-label="Filtrar fecha hasta" value={props.columnFilters.dateTo} min={props.columnFilters.dateFrom || undefined}
+                  onChange={(event) => props.setColumnFilters({ ...props.columnFilters, dateTo: event.target.value })} />
+              </label>
+            </div>
+            <button className="mp-sync-button" type="button" disabled={!hasActiveFilters} onClick={() => {
+              props.setQuery("");
+              props.setPaidBy("all");
+              props.setCurrencyFilter("all");
+              props.setSharedScope("all");
+              props.setColumnFilters(defaultExpenseColumnFilters);
+            }}>Limpiar filtros</button>
             <button
               className="primary"
               type="button"
@@ -1967,7 +2053,7 @@ function Expenses(props: {
             </button>
           </div>
           <form
-            className="panel form-panel"
+            className="panel form-panel expense-new-form"
             onSubmit={(e) => {
               e.preventDefault();
               props.onAdd({
@@ -2036,7 +2122,7 @@ function Expenses(props: {
             <button className="primary" type="submit"><Plus size={16} /> Agregar</button>
           </form>
         </div>
-        <div className="panel table-panel">
+        <div className="panel table-panel expense-movements">
           <div className="table-heading">
             <div>
               <h2>Movimientos</h2>
@@ -2056,6 +2142,7 @@ function Expenses(props: {
               {allMonthsExpanded ? "Colapsar todos" : "Expandir todos"}
             </button>
           </div>
+          <div className="expense-table-scroll" role="region" aria-label="Movimientos del hogar" tabIndex={0}>
           <table className="expense-table">
             <colgroup>
               <col className="expense-date-col" />
@@ -2077,13 +2164,14 @@ function Expenses(props: {
                 <th><button className="sort-header" onClick={() => updateSort("category")}>Categoria{sortIndicator(sort, "category")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("source")}>Origen{sortIndicator(sort, "source")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("shared")}>Compartido{sortIndicator(sort, "shared")}</button></th>
-                <th><button className="sort-header" onClick={() => updateSort("recurring")}>Recurrente{sortIndicator(sort, "recurring")}</button></th>
-                <th><button className="sort-header" onClick={() => updateSort("amount")}>Importe{sortIndicator(sort, "amount")}</button></th>
+                <th className="recurring-cell"><button className="sort-header" onClick={() => updateSort("recurring")}>Recurrente{sortIndicator(sort, "recurring")}</button></th>
+                <th className="amount-cell"><button className="sort-header" onClick={() => updateSort("amount")}>Importe{sortIndicator(sort, "amount")}</button></th>
                 <th><button className="sort-header" onClick={() => updateSort("notes")}>Nota{sortIndicator(sort, "notes")}</button></th>
                 <th>Acciones</th>
               </tr>
             </thead>
             <tbody>
+              {!periods.length && <tr><td colSpan={10}>No hay consumos que coincidan con los filtros.</td></tr>}
               {periods.map((period) => {
                 const monthExpenses = groupedExpenses[period];
                 const sortedMonthExpenses = sortExpenses(monthExpenses, sort, props.categories, props.users);
@@ -2174,7 +2262,7 @@ function Expenses(props: {
                                 <span className={expense.is_shared ? "chip shared-chip" : "chip"}>{expense.is_shared ? "Compartido" : "Personal"}</span>
                               )}
                             </td>
-                            <td>
+                            <td className="recurring-cell">
                               {isEditing ? (
                                 <input type="checkbox" checked={editIsRecurring} onChange={(event) => setEditIsRecurring(event.target.checked)} aria-label={`Editar recurrente ${expense.description}`} />
                               ) : (
@@ -2186,7 +2274,7 @@ function Expenses(props: {
                                 />
                               )}
                             </td>
-                            <td>
+                            <td className="amount-cell">
                               {isEditing ? (
                                 <input className="amount-cell-input" value={editAmount} onChange={(event) => setEditAmount(event.target.value)} aria-label={`Editar importe ${expense.description}`} inputMode="decimal" />
                               ) : (
@@ -2256,6 +2344,7 @@ function Expenses(props: {
               })}
             </tbody>
           </table>
+          </div>
         </div>
       </div>
     </section>
@@ -2842,8 +2931,8 @@ function CashWallet({ users, homeId }: { users: User[]; homeId: number }) {
 
 function HistoryPanel({ users, homeId }: { users: User[]; homeId: number }) {
   const [tab, setTab] = useState<"log" | "imports">("log");
-  const history = useQuery({ queryKey: ["history", homeId], queryFn: () => api.history(homeId) });
-  const imports = useQuery({ queryKey: ["imports", homeId, "all"], queryFn: () => api.imports(homeId) });
+  const history = useQuery({ queryKey: ["history", homeId], queryFn: () => api.history(homeId), enabled: tab === "log" });
+  const imports = useQuery({ queryKey: ["imports", homeId, "coverage"], queryFn: () => api.importCoverage(homeId), enabled: tab === "imports", staleTime: 60_000 });
   return (
     <section className="panel table-panel">
       <div className="tabs">
@@ -2868,9 +2957,11 @@ function HistoryPanel({ users, homeId }: { users: User[]; homeId: number }) {
             </tbody>
           </table>
         </>
-      ) : (
-        <ImportCoverageTable imports={imports.data ?? []} users={users} />
-      )}
+      ) : imports.isPending ? (
+        <div className="import-coverage-loading" role="status"><LoaderCircle className="spin" size={22} /> Cargando resumen de importaciones…</div>
+      ) : imports.isError ? (
+        <div className="stack"><p className="form-error">No se pudo cargar el resumen: {imports.error.message}</p><button className="mp-sync-button" onClick={() => imports.refetch()}>Reintentar</button></div>
+      ) : <ImportCoverageTable imports={imports.data} users={users} />}
     </section>
   );
 }
@@ -3255,12 +3346,12 @@ function HelpHint({ text }: { text: string }) {
 }
 
 function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentUser: User; homeId: number }) {
-  const [period, setPeriod] = useState(currentMonthPeriod());
+  const [period, setPeriod] = useState(() => shiftMonthPeriod(currentMonthPeriod(), -1));
   const [monthlyAmount, setMonthlyAmount] = useState("4000000");
   const [shares, setShares] = useState<Record<number, string>>({});
-  const [openingDate, setOpeningDate] = useState(`${currentMonthPeriod()}-01`);
+  const [openingDate, setOpeningDate] = useState(() => `${period}-01`);
   const [openingAmount, setOpeningAmount] = useState("0");
-  const [movement, setMovement] = useState({ date: currentDateInputValue(), from: "", to: "fund", amount: "", note: "" });
+  const [movement, setMovement] = useState(() => ({ date: periodEndDate(period), from: "", to: "fund", amount: "", note: "" }));
   const [editingMovementId, setEditingMovementId] = useState<number | null>(null);
   const [mpSelectedMonthOnly, setMpSelectedMonthOnly] = useState(false);
   const [mpOriginNotice, setMpOriginNotice] = useState<string | null>(null);
@@ -3269,6 +3360,13 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
   const series = useQuery({ queryKey: ["fund-series", homeId], queryFn: () => api.fundSeries(homeId) });
   const mpActivity = useQuery({ queryKey: ["fund-mp-activity", homeId], queryFn: () => api.fundMpActivity(homeId) });
   const data = fund.data;
+  const selectPeriod = (nextPeriod: string) => {
+    setPeriod(nextPeriod);
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(nextPeriod)) {
+      setEditingMovementId(null);
+      setMovement((current) => ({ ...current, date: periodEndDate(nextPeriod), amount: "", note: "" }));
+    }
+  };
 
   useEffect(() => {
     if (data?.config) {
@@ -3366,7 +3464,7 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
         <div className="fund-toolbar panel">
           <div>
             <span className="eyebrow">Período</span>
-            <input aria-label="Mes del fondo" type="month" value={period} onChange={(event) => setPeriod(event.target.value)} />
+            <input aria-label="Mes del fondo" type="month" value={period} onChange={(event) => selectPeriod(event.target.value)} />
             <HelpHint text="Elegí el mes que querés consultar o configurar. Podés volver a otro mes aunque éste todavía no tenga fondo iniciado." />
           </div>
           <span className={`fund-status ${data.status}`}>{fundStatusLabel(data.status)}</span>
@@ -3404,7 +3502,7 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
       <div className="fund-toolbar panel">
         <div>
           <span className="eyebrow">Período</span>
-          <input aria-label="Mes del fondo" type="month" value={period} onChange={(event) => setPeriod(event.target.value)} />
+          <input aria-label="Mes del fondo" type="month" value={period} onChange={(event) => selectPeriod(event.target.value)} />
           <HelpHint text="Cambia el mes consultado. La configuración se hereda del último mes configurado, sin alterar meses anteriores." />
         </div>
         <span className={`fund-status ${data.status}`}>{fundStatusLabel(data.status)}</span>

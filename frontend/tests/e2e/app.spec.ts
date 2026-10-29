@@ -183,7 +183,8 @@ test("core bills workflow renders and supports import review", async ({ page, re
   await page.getByLabel("Editar importe Cafe de prueba").fill("5000");
   await page.getByLabel("Editar categoria Cafe de prueba").selectOption({ label: "Salud" });
   await page.getByRole("button", { name: "Guardar gasto Cafe de prueba" }).click();
-  await page.getByPlaceholder("Buscar gasto").fill("Salud");
+  await page.getByPlaceholder("Buscar gasto").fill("");
+  await page.getByLabel("Filtrar por categoria").selectOption({ label: "Salud" });
   await expect(page.getByText("Cafe editado")).toBeVisible();
   page.once("dialog", async (dialog) => {
     await dialog.accept();
@@ -204,8 +205,9 @@ test("core bills workflow renders and supports import review", async ({ page, re
   });
   await page.reload();
   await page.getByRole("button", { name: "Consumos" }).click();
-  await page.getByPlaceholder("Buscar gasto").fill("Sin categoria");
+  await page.getByLabel("Filtrar por categoria").selectOption("uncategorized");
   await expect(page.getByText("Gasto sin categoria prueba")).toBeVisible();
+  await page.getByLabel("Filtrar por categoria").selectOption("all");
   await page.getByPlaceholder("Buscar gasto").fill("openai");
   await expect(page.getByText("OPENAI *CHATGPT SUBSCR").first()).toBeVisible();
 

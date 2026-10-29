@@ -262,6 +262,10 @@ export type ImportBatch = {
   lines: ImportLine[];
 };
 
+export type ImportCoverageBatch = Pick<ImportBatch, "id" | "filename" | "source_type" | "uploaded_by_user_id" | "card_network" | "fx_rate_ars_per_usd" | "status" | "created_at" | "paid_by_user_ids"> & {
+  periods: string[];
+};
+
 export type CashWalletSummary = {
   balances: Array<{ user_id: number; currency: Currency; balance: string }>;
   entries: Array<{ id: number; user_id: number; date: string; description: string; currency: Currency; amount: string }>;

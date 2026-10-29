@@ -1,21 +1,21 @@
-import type { ImportBatch, User } from "./types";
+import type { ImportCoverageBatch, User } from "./types";
 
 export const importCoverageSources = ["Visa", "Mastercard", "Cuenta"] as const;
 export type ImportCoverageSource = typeof importCoverageSources[number];
-export type ImportCoverageMonth = Partial<Record<ImportCoverageSource, ImportBatch[]>>;
+export type ImportCoverageMonth = Partial<Record<ImportCoverageSource, ImportCoverageBatch[]>>;
 type ImportCoverageRow = {
   paidByUserId: number;
   months: Record<string, ImportCoverageMonth>;
 };
 
-function importSource(batch: ImportBatch): ImportCoverageSource {
+function importSource(batch: ImportCoverageBatch): ImportCoverageSource {
   if (batch.source_type === "bbva_account_xls") return "Cuenta";
   if (batch.card_network?.toLowerCase() === "mastercard") return "Mastercard";
   if (batch.card_network?.toLowerCase() === "visa") return "Visa";
   return batch.filename.toLowerCase().includes("master") ? "Mastercard" : "Visa";
 }
 
-export function buildImportCoverage(imports: ImportBatch[], users: User[]) {
+export function buildImportCoverage(imports: ImportCoverageBatch[], users: User[]) {
   // Account numbers and uploaders are metadata, never part of a payer's row key.
   const rows = new Map<number, ImportCoverageRow>(
     users.map((user) => [user.id, { paidByUserId: user.id, months: {} }])
@@ -25,11 +25,7 @@ export function buildImportCoverage(imports: ImportBatch[], users: User[]) {
   for (const batch of orderedImports) {
     if (!batch.paid_by_user_ids.length) continue;
     const source = importSource(batch);
-    const periods = new Set(
-      batch.source_type === "bbva_account_xls"
-        ? batch.lines.length ? batch.lines.map((line) => line.date.slice(0, 7)) : batch.created_at ? [batch.created_at.slice(0, 7)] : []
-        : batch.statement_period ? [batch.statement_period] : batch.created_at ? [batch.created_at.slice(0, 7)] : []
-    );
+    const periods = new Set(batch.periods);
     for (const paidByUserId of new Set(batch.paid_by_user_ids)) {
       if (!rows.has(paidByUserId)) rows.set(paidByUserId, { paidByUserId, months: {} });
       const row = rows.get(paidByUserId)!;

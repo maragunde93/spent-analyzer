@@ -1,12 +1,13 @@
 import sys
 import unittest
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -16,7 +17,8 @@ sys.path.insert(0, str(ROOT / "backend"))
 from app.api.imports import router
 from app.auth import get_current_user
 from app.database import Base, get_db
-from app.models import HomeGroup, ImportLine, Membership, User
+from app.domain import Currency, ExpenseSource, ImportLineKind
+from app.models import Expense, HomeGroup, ImportBatch, ImportLine, Membership, User
 from app.services.bbva_parser import parse_bbva_visa_text
 
 
@@ -106,6 +108,57 @@ class ImportUploadTests(unittest.TestCase):
         self.assertEqual([line["duplicate_status"] for line in second["lines"]], [
             "already_committed", "previously_parsed", "already_committed",
         ])
+
+    def test_coverage_is_compact_and_uses_bounded_queries(self):
+        card = ImportBatch(
+            home_group_id=self.home.id, uploaded_by_user_id=self.user.id,
+            filename="visa.pdf", source_type="bbva_visa_pdf", statement_period="2026-09",
+            card_network="visa", status="committed", created_at=datetime(2026, 10, 2),
+        )
+        account = ImportBatch(
+            home_group_id=self.home.id, uploaded_by_user_id=self.user.id,
+            filename="cuenta.xls", source_type="bbva_account_xls", status="committed",
+            created_at=datetime(2026, 10, 2),
+        )
+        self.db.add_all([card, account])
+        self.db.flush()
+        lines = [
+            ImportLine(import_batch_id=batch.id, home_group_id=self.home.id, date=line_date,
+                       description="Compra", kind=ImportLineKind.purchase, currency=Currency.ARS,
+                       original_amount=Decimal("100"), status="committed", fingerprint=f"coverage-{index}", raw_text="Compra")
+            for index, (batch, line_date) in enumerate([
+                (card, date(2026, 8, 20)), (account, date(2026, 8, 30)), (account, date(2026, 9, 1)),
+            ])
+        ]
+        self.db.add_all(lines)
+        self.db.flush()
+        self.db.add_all([
+            Expense(home_group_id=self.home.id, date=line.date, description="Compra", paid_by_user_id=self.user.id,
+                    uploaded_by_user_id=self.user.id, source=ExpenseSource.import_pdf, currency=Currency.ARS,
+                    original_amount=Decimal("100"), amount_ars=Decimal("100"), import_line_id=line.id)
+            for line in lines
+        ])
+        self.db.commit()
+        home_id = self.home.id
+
+        statements = []
+        def count_select(_connection, _cursor, statement, _parameters, _context, _executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(self.engine, "before_cursor_execute", count_select)
+        try:
+            response = self.client.get(f"/households/{home_id}/imports/coverage")
+        finally:
+            event.remove(self.engine, "before_cursor_execute", count_select)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertLessEqual(len(statements), 5)
+        by_id = {batch["id"]: batch for batch in response.json()}
+        self.assertEqual(by_id[card.id]["periods"], ["2026-09"])
+        self.assertEqual(by_id[account.id]["periods"], ["2026-08", "2026-09"])
+        self.assertEqual(by_id[card.id]["paid_by_user_ids"], [self.user.id])
+        self.assertEqual(by_id[account.id]["paid_by_user_ids"], [self.user.id])
+        self.assertNotIn("lines", by_id[card.id])
 
 
 if __name__ == "__main__":

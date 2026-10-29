@@ -30,6 +30,7 @@ from app.models import (
     User,
 )
 from app.api.fund import approve_month, close_month, update_mp_contribution
+from app.api.dashboard import dashboard
 from app.schemas import FundMpContributionUpdate
 from app.services.fund import calculate_fund_summary
 
@@ -188,6 +189,66 @@ class HouseholdFundTests(unittest.TestCase):
         self.assertEqual(june["totals"]["shared_expenses"], "1000.00")
         self.assertFalse(any("no tienen período" in alert for alert in june["alerts"]))
         self.assertFalse(may["activated"])
+
+    def test_dashboard_charts_and_fund_assign_card_expenses_to_the_same_statement_month(self):
+        september_card = ImportBatch(
+            home_group_id=self.home.id, uploaded_by_user_id=self.mauro.id, filename="visa-septiembre.pdf",
+            source_type="bbva_visa_pdf", statement_period="2026-09", status="committed",
+        )
+        october_card = ImportBatch(
+            home_group_id=self.home.id, uploaded_by_user_id=self.mauro.id, filename="visa-octubre.pdf",
+            source_type="bbva_visa_pdf", statement_period="2026-10", status="committed",
+        )
+        self.db.add_all([september_card, october_card])
+        self.db.flush()
+        august_purchase = ImportLine(
+            import_batch_id=september_card.id, home_group_id=self.home.id, date=date(2026, 8, 25),
+            description="Compra de agosto", kind=ImportLineKind.purchase, currency=Currency.ARS,
+            original_amount=Decimal("236343"), status="committed", fingerprint="card-sep", raw_text="Compra",
+        )
+        september_purchase = ImportLine(
+            import_batch_id=october_card.id, home_group_id=self.home.id, date=date(2026, 9, 25),
+            description="Compra de septiembre", kind=ImportLineKind.purchase, currency=Currency.ARS,
+            original_amount=Decimal("100000"), status="committed", fingerprint="card-oct", raw_text="Compra",
+        )
+        self.db.add_all([august_purchase, september_purchase])
+        self.db.flush()
+        self._expense("236343", expense_date=date(2026, 8, 25), source=ExpenseSource.import_pdf, import_line_id=august_purchase.id)
+        self._expense("100000", expense_date=date(2026, 9, 25), source=ExpenseSource.import_pdf, import_line_id=september_purchase.id)
+        self._expense("3921880", expense_date=date(2026, 9, 10))
+
+        summary = dashboard(self.home.id, is_shared=True, user=self.mauro, db=self.db)
+        fund = calculate_fund_summary(self.db, self.home.id, "2026-09")
+        self.assertEqual(fund["totals"]["shared_expenses"], "4158223.00")
+        self.assertEqual({row["period"]: row["amount_ars"] for row in summary.trend}, {
+            "2026-09": Decimal("4158223.00"), "2026-10": Decimal("100000.00"),
+        })
+        self.assertEqual(summary.monthly_by_category[0]["period"], "2026-09")
+        self.assertEqual(summary.monthly_by_category[0]["Sin categoria"], Decimal("4158223.00"))
+        self.assertEqual(summary.cumulative_by_category[0]["Sin categoria"], Decimal("4158223.00"))
+        self.assertEqual(summary.monthly_category_by_payer[0]["categories"][0]["total_amount_ars"], Decimal("4158223.00"))
+
+    def test_dashboard_uses_purchase_month_when_card_statement_period_is_missing(self):
+        batch = ImportBatch(
+            home_group_id=self.home.id, uploaded_by_user_id=self.mauro.id, filename="sin-periodo.pdf",
+            source_type="bbva_visa_pdf", period_label="20-Oct-26", statement_period=None, status="committed",
+        )
+        self.db.add(batch)
+        self.db.flush()
+        line = ImportLine(
+            import_batch_id=batch.id, home_group_id=self.home.id, date=date(2026, 8, 20),
+            description="Compra sin período", kind=ImportLineKind.purchase, currency=Currency.ARS,
+            original_amount=Decimal("1000"), status="committed", fingerprint="card-fallback", raw_text="Compra",
+        )
+        self.db.add(line)
+        self.db.flush()
+        self._expense("1000", expense_date=date(2026, 8, 20), source=ExpenseSource.import_pdf, import_line_id=line.id)
+
+        summary = dashboard(self.home.id, is_shared=True, user=self.mauro, db=self.db)
+        fund = calculate_fund_summary(self.db, self.home.id, "2026-08")
+        self.assertEqual(summary.trend[0]["period"], "2026-08")
+        self.assertEqual(fund["totals"]["shared_expenses"], "1000.00")
+        self.assertTrue(any("no tienen período" in alert for alert in fund["alerts"]))
 
     def test_common_mp_account_tracks_contributors_without_crediting_token_owner(self):
         integration = MercadoPagoIntegration(home_group_id=self.home.id, user_id=self.mauro.id, access_token="secret", fund_role="fondo_comun")

@@ -62,6 +62,40 @@ async function clickInViewport(locator: Locator) {
   await locator.click();
 }
 
+test("fund opens on the previous month and manual dates follow the viewed period", async ({ page, request }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Fondo común" }).click();
+  const previousMonth = await page.evaluate(() => {
+    const now = new Date();
+    const previous = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    return `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, "0")}`;
+  });
+  await expect(page.getByLabel("Mes del fondo")).toHaveValue(previousMonth);
+  await expect(page.getByLabel("Fecha de inicio")).toHaveValue(`${previousMonth}-01`);
+  await page.getByLabel("Mes del fondo").fill("2026-08");
+  await expect(page.getByLabel("Fecha de inicio")).toHaveValue("2026-08-01");
+
+  await seedFund(request, previousMonth);
+  await page.reload();
+  await page.getByRole("button", { name: "Fondo común" }).click();
+  await expect(page.getByLabel("Fecha del movimiento")).toHaveValue(await page.evaluate(() => {
+    const now = new Date();
+    const lastDay = new Date(now.getFullYear(), now.getMonth(), 0);
+    return `${lastDay.getFullYear()}-${String(lastDay.getMonth() + 1).padStart(2, "0")}-${String(lastDay.getDate()).padStart(2, "0")}`;
+  }));
+  const currentMonth = await page.evaluate(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  });
+  const currentMonthEnd = await page.evaluate(() => {
+    const now = new Date();
+    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    return `${lastDay.getFullYear()}-${String(lastDay.getMonth() + 1).padStart(2, "0")}-${String(lastDay.getDate()).padStart(2, "0")}`;
+  });
+  await page.getByLabel("Mes del fondo").fill(currentMonth);
+  await expect(page.getByLabel("Fecha del movimiento")).toHaveValue(currentMonthEnd);
+});
+
 test("configuration is inherited until a later month overrides it", async ({ page, request }) => {
   await seedFund(request);
   const august = await request.put(`${apiBase}/fund/config/2026-08`, {

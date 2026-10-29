@@ -11,7 +11,7 @@ from app.auth import get_current_user, require_home_member
 from app.database import get_db
 from app.domain import Currency, ExpenseSource, ImportLineKind
 from app.models import CashWalletEntry, Category, Earning, Expense, FxRate, ImportBatch, ImportLine, Subcategory, User
-from app.schemas import ImportBatchRead, ImportBatchUpdate, ImportCommitRequest
+from app.schemas import ImportBatchRead, ImportBatchUpdate, ImportCommitRequest, ImportCoverageBatchRead
 from app.services.accounting import amount_to_ars
 from app.services.audit import log_action
 from app.services.bbva_account_parser import parse_bbva_account_xls
@@ -36,6 +36,63 @@ def list_import_batches(
     if status:
         stmt = stmt.where(ImportBatch.status == status)
     return [_read_batch(db, batch.id) for batch in db.scalars(stmt)]
+
+
+@router.get("/coverage", response_model=list[ImportCoverageBatchRead])
+def list_import_coverage(
+    home_group_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[ImportCoverageBatchRead]:
+    require_home_member(home_group_id, user, db)
+    batches = list(db.scalars(
+        select(ImportBatch).where(ImportBatch.home_group_id == home_group_id).order_by(ImportBatch.created_at.desc())
+    ))
+    if not batches:
+        return []
+
+    batch_ids = [batch.id for batch in batches]
+    payers: dict[int, set[int]] = {batch_id: set() for batch_id in batch_ids}
+    for batch_id, payer_id in db.execute(
+        select(ImportLine.import_batch_id, Expense.paid_by_user_id)
+        .join(Expense, Expense.import_line_id == ImportLine.id)
+        .where(ImportLine.import_batch_id.in_(batch_ids))
+        .distinct()
+    ):
+        payers[batch_id].add(payer_id)
+
+    account_ids = [batch.id for batch in batches if batch.source_type == "bbva_account_xls"]
+    account_periods: dict[int, set[str]] = {batch_id: set() for batch_id in account_ids}
+    if account_ids:
+        for batch_id, line_date in db.execute(
+            select(ImportLine.import_batch_id, ImportLine.date)
+            .where(ImportLine.import_batch_id.in_(account_ids))
+            .distinct()
+        ):
+            account_periods[batch_id].add(line_date.strftime("%Y-%m"))
+
+    def periods_for(batch: ImportBatch) -> list[str]:
+        created_period = batch.created_at.strftime("%Y-%m") if batch.created_at else None
+        if batch.source_type == "bbva_account_xls":
+            return sorted(account_periods[batch.id]) or ([created_period] if created_period else [])
+        period = batch.statement_period or infer_card_statement_period(batch.period_label) or created_period
+        return [period] if period else []
+
+    return [
+        ImportCoverageBatchRead(
+            id=batch.id,
+            filename=batch.filename,
+            source_type=batch.source_type,
+            uploaded_by_user_id=batch.uploaded_by_user_id,
+            card_network=batch.card_network,
+            fx_rate_ars_per_usd=batch.fx_rate_ars_per_usd,
+            status=batch.status,
+            created_at=batch.created_at.isoformat() if batch.created_at else None,
+            paid_by_user_ids=sorted(payers[batch.id]),
+            periods=periods_for(batch),
+        )
+        for batch in batches
+    ]
 
 
 @router.post("/bbva-visa", response_model=ImportBatchRead)

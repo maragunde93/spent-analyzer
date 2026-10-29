@@ -32,6 +32,7 @@ from app.models import (
     MercadoPagoIntegration,
     User,
 )
+from app.services.statement_period import expense_reporting_period
 
 CENT = Decimal("0.01")
 HUNDRED = Decimal("100")
@@ -117,11 +118,7 @@ def expense_fund_context(
 
 
 def expense_period(expense: Expense, batch: ImportBatch | None) -> tuple[str, bool]:
-    if expense.source == ExpenseSource.import_pdf:
-        if batch and batch.statement_period:
-            return batch.statement_period, False
-        return period_for_date(expense.date), True
-    return period_for_date(expense.date), False
+    return expense_reporting_period(expense.date, expense.source, batch.statement_period if batch else None)
 
 
 def ensure_mp_assignments(db: Session, home_group_id: int) -> list[FundMpAssignment]:
