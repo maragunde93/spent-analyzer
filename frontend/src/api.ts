@@ -1,5 +1,5 @@
 import { categories, demoDashboard, demoExpenses, demoImport } from "./mockData";
-import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, FundMpActivity, FundSeriesRow, FundSummary, HomeGroup, ImportBatch, MercadoPagoIntegration, MercadoPagoSyncAccepted, ReceiptImport, Subcategory, User } from "./types";
+import type { AuditLog, CashWalletSummary, Category, Currency, DashboardSummary, Expense, FundMpActivity, FundSeriesRow, FundSummary, HomeGroup, ImportBatch, ImportCoverageBatch, MercadoPagoIntegration, MercadoPagoSyncAccepted, ReceiptImport, Subcategory, User } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "/api" : "/finance/api");
 const TEST_USER_EMAIL = import.meta.env.VITE_TEST_USER_EMAIL;
@@ -230,6 +230,8 @@ export const api = {
     const params = status ? `?status=${status}` : "";
     return request<ImportBatch[]>(`/households/${homeId}/imports${params}`, undefined, [demoImport]);
   },
+  importCoverage: (homeId: number) =>
+    request<ImportCoverageBatch[]>(`/households/${homeId}/imports/coverage`),
   importBatch: (homeId: number, batchId: number) =>
     request<ImportBatch>(`/households/${homeId}/imports/${batchId}`, undefined, demoImport),
   updateImportBatch: (homeId: number, batchId: number, payload: { statement_period: string | null }) =>

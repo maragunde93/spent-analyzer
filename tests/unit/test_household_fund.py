@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from fastapi import HTTPException
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -28,7 +29,8 @@ from app.models import (
     MercadoPagoIntegration,
     User,
 )
-from app.api.fund import update_mp_contribution
+from app.api.fund import approve_month, close_month, update_mp_contribution
+from app.api.dashboard import dashboard
 from app.schemas import FundMpContributionUpdate
 from app.services.fund import calculate_fund_summary
 
@@ -99,14 +101,68 @@ class HouseholdFundTests(unittest.TestCase):
         self.assertEqual(result["plan"][0]["to_name"], "Mauro")
         self.assertEqual(result["totals"]["agreed_balance"], "0.00")
 
+    def test_each_approval_records_only_own_fund_transfers_once(self):
+        closed = close_month(self.home.id, "2026-06", self.mauro, self.db)
+        self.assertEqual(closed["status"], "pendiente_aprobacion")
+        self.assertEqual(self.db.query(FundManualMovement).count(), 0)
+
+        mauro_approved = approve_month(self.home.id, "2026-06", self.mauro, self.db)
+        self.assertEqual(mauro_approved["status"], "pendiente_aprobacion")
+        self.assertEqual(mauro_approved["totals"]["verified_balance"], "3040000.00")
+        self.assertEqual(mauro_approved["totals"]["difference"], "-960000.00")
+        self.assertEqual([(row["from_name"], row["amount"]) for row in mauro_approved["plan"]], [("Mica", "960000.00")])
+        self.assertEqual(self.db.query(FundManualMovement).count(), 1)
+
+        approve_month(self.home.id, "2026-06", self.mauro, self.db)
+        self.assertEqual(self.db.query(FundManualMovement).count(), 1)
+        mica_approved = approve_month(self.home.id, "2026-06", self.mica, self.db)
+        self.assertEqual(mica_approved["status"], "cerrado")
+        self.assertEqual(mica_approved["plan"], [])
+        self.assertEqual(mica_approved["totals"]["agreed_balance"], "4000000.00")
+        self.assertEqual(mica_approved["totals"]["verified_balance"], "4000000.00")
+        self.assertEqual(mica_approved["totals"]["difference"], "0.00")
+        self.assertEqual({movement.date for movement in self.db.query(FundManualMovement)}, {date(2026, 6, 30)})
+
+    def test_approval_registers_reimbursement_to_person_and_remainder_to_fund(self):
+        self._expense("3500000")
+        close_month(self.home.id, "2026-06", self.mauro, self.db)
+        approved = approve_month(self.home.id, "2026-06", self.mica, self.db)
+        transfers = {(movement.to_user_id, Decimal(movement.amount)) for movement in self.db.query(FundManualMovement)}
+        self.assertEqual(transfers, {(None, Decimal("500000")), (self.mauro.id, Decimal("460000"))})
+        self.assertEqual(approved["plan"], [])
+        self.assertEqual(approved["totals"]["agreed_balance"], "500000.00")
+        self.assertEqual(approved["totals"]["verified_balance"], "500000.00")
+        self.assertEqual(approved["totals"]["difference"], "0.00")
+
+    def test_stale_plan_cannot_be_approved_or_registered(self):
+        close_month(self.home.id, "2026-06", self.mauro, self.db)
+        self._expense("1000")
+        with self.assertRaises(HTTPException) as error:
+            approve_month(self.home.id, "2026-06", self.mauro, self.db)
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(self.db.query(FundManualMovement).count(), 0)
+
     def test_config_is_inherited_and_excess_uses_the_same_percentages(self):
         self._expense("5000000", expense_date=date(2026, 7, 8))
         result = calculate_fund_summary(self.db, self.home.id, "2026-07")
 
         self.assertTrue(result["config"]["inherited"])
         self.assertEqual(result["totals"]["financing_base"], "5000000.00")
-        self.assertEqual(next(item for item in result["positions"] if item["user_id"] == self.mauro.id)["quota"], "3800000.00")
+        mauro = next(item for item in result["positions"] if item["user_id"] == self.mauro.id)
+        mica = next(item for item in result["positions"] if item["user_id"] == self.mica.id)
+        self.assertEqual((mauro["base_quota"], mauro["extra_quota"], mauro["quota"]), ("3040000.00", "760000.00", "3800000.00"))
+        self.assertEqual((mica["base_quota"], mica["extra_quota"], mica["quota"]), ("960000.00", "240000.00", "1200000.00"))
         self.assertIn("Los gastos superan el fondo configurado por ARS 1.000.000.", result["alerts"])
+
+    def test_excess_breakdown_matches_percentages_and_total_with_cents(self):
+        self._expense("4158223")
+        result = calculate_fund_summary(self.db, self.home.id, "2026-06")
+        mauro = next(item for item in result["positions"] if item["user_id"] == self.mauro.id)
+        mica = next(item for item in result["positions"] if item["user_id"] == self.mica.id)
+
+        self.assertEqual((mauro["base_quota"], mauro["extra_quota"], mauro["quota"]), ("3040000.00", "120249.48", "3160249.48"))
+        self.assertEqual((mica["base_quota"], mica["extra_quota"], mica["quota"]), ("960000.00", "37973.52", "997973.52"))
+        self.assertEqual(Decimal(mauro["extra_quota"]) + Decimal(mica["extra_quota"]), Decimal("158223.00"))
 
     def test_excess_zeroes_agreed_balance_without_rewriting_verified_balance(self):
         opening = self.db.query(FundOpeningBalance).filter_by(home_group_id=self.home.id).one()
@@ -133,6 +189,66 @@ class HouseholdFundTests(unittest.TestCase):
         self.assertEqual(june["totals"]["shared_expenses"], "1000.00")
         self.assertFalse(any("no tienen período" in alert for alert in june["alerts"]))
         self.assertFalse(may["activated"])
+
+    def test_dashboard_charts_and_fund_assign_card_expenses_to_the_same_statement_month(self):
+        september_card = ImportBatch(
+            home_group_id=self.home.id, uploaded_by_user_id=self.mauro.id, filename="visa-septiembre.pdf",
+            source_type="bbva_visa_pdf", statement_period="2026-09", status="committed",
+        )
+        october_card = ImportBatch(
+            home_group_id=self.home.id, uploaded_by_user_id=self.mauro.id, filename="visa-octubre.pdf",
+            source_type="bbva_visa_pdf", statement_period="2026-10", status="committed",
+        )
+        self.db.add_all([september_card, october_card])
+        self.db.flush()
+        august_purchase = ImportLine(
+            import_batch_id=september_card.id, home_group_id=self.home.id, date=date(2026, 8, 25),
+            description="Compra de agosto", kind=ImportLineKind.purchase, currency=Currency.ARS,
+            original_amount=Decimal("236343"), status="committed", fingerprint="card-sep", raw_text="Compra",
+        )
+        september_purchase = ImportLine(
+            import_batch_id=october_card.id, home_group_id=self.home.id, date=date(2026, 9, 25),
+            description="Compra de septiembre", kind=ImportLineKind.purchase, currency=Currency.ARS,
+            original_amount=Decimal("100000"), status="committed", fingerprint="card-oct", raw_text="Compra",
+        )
+        self.db.add_all([august_purchase, september_purchase])
+        self.db.flush()
+        self._expense("236343", expense_date=date(2026, 8, 25), source=ExpenseSource.import_pdf, import_line_id=august_purchase.id)
+        self._expense("100000", expense_date=date(2026, 9, 25), source=ExpenseSource.import_pdf, import_line_id=september_purchase.id)
+        self._expense("3921880", expense_date=date(2026, 9, 10))
+
+        summary = dashboard(self.home.id, is_shared=True, user=self.mauro, db=self.db)
+        fund = calculate_fund_summary(self.db, self.home.id, "2026-09")
+        self.assertEqual(fund["totals"]["shared_expenses"], "4158223.00")
+        self.assertEqual({row["period"]: row["amount_ars"] for row in summary.trend}, {
+            "2026-09": Decimal("4158223.00"), "2026-10": Decimal("100000.00"),
+        })
+        self.assertEqual(summary.monthly_by_category[0]["period"], "2026-09")
+        self.assertEqual(summary.monthly_by_category[0]["Sin categoria"], Decimal("4158223.00"))
+        self.assertEqual(summary.cumulative_by_category[0]["Sin categoria"], Decimal("4158223.00"))
+        self.assertEqual(summary.monthly_category_by_payer[0]["categories"][0]["total_amount_ars"], Decimal("4158223.00"))
+
+    def test_dashboard_uses_purchase_month_when_card_statement_period_is_missing(self):
+        batch = ImportBatch(
+            home_group_id=self.home.id, uploaded_by_user_id=self.mauro.id, filename="sin-periodo.pdf",
+            source_type="bbva_visa_pdf", period_label="20-Oct-26", statement_period=None, status="committed",
+        )
+        self.db.add(batch)
+        self.db.flush()
+        line = ImportLine(
+            import_batch_id=batch.id, home_group_id=self.home.id, date=date(2026, 8, 20),
+            description="Compra sin período", kind=ImportLineKind.purchase, currency=Currency.ARS,
+            original_amount=Decimal("1000"), status="committed", fingerprint="card-fallback", raw_text="Compra",
+        )
+        self.db.add(line)
+        self.db.flush()
+        self._expense("1000", expense_date=date(2026, 8, 20), source=ExpenseSource.import_pdf, import_line_id=line.id)
+
+        summary = dashboard(self.home.id, is_shared=True, user=self.mauro, db=self.db)
+        fund = calculate_fund_summary(self.db, self.home.id, "2026-08")
+        self.assertEqual(summary.trend[0]["period"], "2026-08")
+        self.assertEqual(fund["totals"]["shared_expenses"], "1000.00")
+        self.assertTrue(any("no tienen período" in alert for alert in fund["alerts"]))
 
     def test_common_mp_account_tracks_contributors_without_crediting_token_owner(self):
         integration = MercadoPagoIntegration(home_group_id=self.home.id, user_id=self.mauro.id, access_token="secret", fund_role="fondo_comun")

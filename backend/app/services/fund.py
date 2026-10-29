@@ -32,6 +32,7 @@ from app.models import (
     MercadoPagoIntegration,
     User,
 )
+from app.services.statement_period import expense_reporting_period
 
 CENT = Decimal("0.01")
 HUNDRED = Decimal("100")
@@ -117,11 +118,7 @@ def expense_fund_context(
 
 
 def expense_period(expense: Expense, batch: ImportBatch | None) -> tuple[str, bool]:
-    if expense.source == ExpenseSource.import_pdf:
-        if batch and batch.statement_period:
-            return batch.statement_period, False
-        return period_for_date(expense.date), True
-    return period_for_date(expense.date), False
+    return expense_reporting_period(expense.date, expense.source, batch.statement_period if batch else None)
 
 
 def ensure_mp_assignments(db: Session, home_group_id: int) -> list[FundMpAssignment]:
@@ -411,9 +408,14 @@ def calculate_fund_summary(db: Session, home_group_id: int, period: str, *, pers
         member.id: money(financing_base * share_by_user.get(member.id, Decimal("0")) / HUNDRED)
         for _, member in members
     }
+    base_quotas = {
+        member.id: money(configured * share_by_user.get(member.id, Decimal("0")) / HUNDRED)
+        for _, member in members
+    }
     if members:
         last_member_id = members[-1][1].id
         quotas[last_member_id] = money(quotas[last_member_id] + financing_base - sum(quotas.values(), Decimal("0")))
+        base_quotas[last_member_id] = money(base_quotas[last_member_id] + configured - sum(base_quotas.values(), Decimal("0")))
     for _, member in members:
         percentage = share_by_user.get(member.id, Decimal("0"))
         quota = quotas[member.id]
@@ -427,6 +429,8 @@ def calculate_fund_summary(db: Session, home_group_id: int, period: str, *, pers
             "display_name": member.display_name,
             "percentage": str(percentage),
             "quota": str(quota),
+            "base_quota": str(base_quotas[member.id]),
+            "extra_quota": str(money(quota - base_quotas[member.id])),
             "direct_paid": str(direct),
             "contributed": str(contributed),
             "personal_outflow": str(money(personal_outflow_by_user[member.id])),

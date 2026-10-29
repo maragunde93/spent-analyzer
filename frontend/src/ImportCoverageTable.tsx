@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { Check, X } from "lucide-react";
 import { buildImportCoverage, importCoverageSources } from "./importCoverage";
 import type { ImportCoverageMonth } from "./importCoverage";
-import type { ImportBatch, User } from "./types";
+import type { ImportCoverageBatch, User } from "./types";
 
 const monthNames = Array.from({ length: 12 }, (_, index) =>
   new Intl.DateTimeFormat("es-AR", { month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(2026, index, 1)))
@@ -52,7 +52,7 @@ function CoverageCell({ month, users }: { month?: ImportCoverageMonth; users: Us
   );
 }
 
-export function ImportCoverageTable({ imports, users }: { imports: ImportBatch[]; users: User[] }) {
+export function ImportCoverageTable({ imports, users }: { imports: ImportCoverageBatch[]; users: User[] }) {
   const summary = useMemo(() => buildImportCoverage(imports, users), [imports, users]);
   if (!summary.years.length) return <p className="muted">No hay importaciones con pagador asignado.</p>;
   return (

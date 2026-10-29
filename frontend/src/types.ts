@@ -116,6 +116,8 @@ export type FundSummary = {
     display_name: string;
     percentage: string;
     quota: string;
+    base_quota: string;
+    extra_quota: string;
     direct_paid: string;
     contributed: string;
     personal_outflow: string;
@@ -258,6 +260,10 @@ export type ImportBatch = {
   created_at: string | null;
   paid_by_user_ids: number[];
   lines: ImportLine[];
+};
+
+export type ImportCoverageBatch = Pick<ImportBatch, "id" | "filename" | "source_type" | "uploaded_by_user_id" | "card_network" | "fx_rate_ars_per_usd" | "status" | "created_at" | "paid_by_user_ids"> & {
+  periods: string[];
 };
 
 export type CashWalletSummary = {

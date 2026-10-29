@@ -1,6 +1,8 @@
 from datetime import date, timedelta
 import re
 
+from app.domain import ExpenseSource
+
 
 MONTH_MAP = {
     "ene": 1,
@@ -45,3 +47,12 @@ def valid_statement_period(value: str | None) -> bool:
     if value is None:
         return True
     return bool(re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", value))
+
+
+def expense_reporting_period(expense_date: date, source: ExpenseSource, statement_period: str | None) -> tuple[str, bool]:
+    """Use the card's statement month; otherwise retain the purchase date's month."""
+    if source == ExpenseSource.import_pdf:
+        if statement_period:
+            return statement_period, False
+        return expense_date.strftime("%Y-%m"), True
+    return expense_date.strftime("%Y-%m"), False

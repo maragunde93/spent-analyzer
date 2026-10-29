@@ -268,6 +268,19 @@ class ImportBatchRead(BaseModel):
     lines: list[ImportLineRead] = []
 
 
+class ImportCoverageBatchRead(BaseModel):
+    id: int
+    filename: str
+    source_type: str
+    uploaded_by_user_id: int
+    card_network: str | None = None
+    fx_rate_ars_per_usd: Decimal | None = None
+    status: str
+    created_at: str | None = None
+    paid_by_user_ids: list[int] = []
+    periods: list[str] = []
+
+
 class ImportBatchUpdate(BaseModel):
     statement_period: str | None = None
 
