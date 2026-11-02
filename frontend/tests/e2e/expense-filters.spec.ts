@@ -46,6 +46,40 @@ test.beforeEach(async ({ page }) => {
   await page.getByRole("button", { name: "Consumos", exact: true }).click();
 });
 
+test("credit network filters distinguish cards and preserve network in export", async ({ page }) => {
+  await page.route(/\/expenses$/, (route) => route.fulfill({ json: [
+    expense(21, { source: "import_pdf", card_network: "visa", description: "Compra Visa" }),
+    expense(22, { source: "import_pdf", card_network: "mastercard", description: "Compra Mastercard" }),
+    expense(23, { source: "import_pdf", description: "Credito anterior" })
+  ] }));
+  await page.reload();
+  await page.getByRole("button", { name: "Consumos", exact: true }).click();
+  await page.getByLabel("Filtrar por origen").selectOption("import_pdf:visa");
+  await expect(page.locator(".expense-table tbody .description-cell")).toHaveText(["Compra Visa"]);
+  await expect(page.locator(".expense-table tbody .source-cell")).toHaveText(["Credito Visa"]);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Descargar XLS/ }).click();
+  const stream = await (await downloadPromise).createReadStream();
+  let contents = "";
+  for await (const chunk of stream) contents += chunk.toString();
+  expect(contents).toContain("Credito Visa");
+  expect(contents).not.toContain("Compra Mastercard");
+  await page.getByLabel("Filtrar por origen").selectOption("import_pdf:mastercard");
+  await expect(page.locator(".expense-table tbody .description-cell")).toHaveText(["Compra Mastercard"]);
+  await page.getByLabel("Filtrar por origen").selectOption("import_pdf");
+  await expect(page.locator(".expense-table tbody .description-cell")).toHaveCount(3);
+});
+
+test("payer can be edited for an imported expense", async ({ page }) => {
+  await page.getByLabel("Buscar gasto").fill("Internet hogar");
+  await page.getByLabel("Editar gasto Internet hogar", { exact: true }).click();
+  await page.getByLabel("Editar pagador Internet hogar").selectOption("2");
+  const requestPromise = page.waitForRequest((request) => request.method() === "PUT" && request.url().endsWith("/expenses/1"));
+  await page.route(/\/expenses\/1$/, (route) => route.fulfill({ json: { ...expenses[0], ...route.request().postDataJSON() } }));
+  await page.getByLabel("Guardar gasto Internet hogar", { exact: true }).click();
+  expect((await requestPromise).postDataJSON().paid_by_user_id).toBe(2);
+});
+
 test("sidebar filters combine with existing filters, include date boundaries and filter XLS", async ({ page }, testInfo) => {
   await page.getByLabel("Filtrar por categoria", { exact: true }).selectOption("3");
   await page.getByLabel("Filtrar por origen").selectOption("bank_import");

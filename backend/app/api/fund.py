@@ -279,6 +279,8 @@ def delete_manual_movement(home_group_id: int, movement_id: int, user: User = De
 @router.patch("/mp-contributions/{earning_id}")
 def update_mp_contribution(home_group_id: int, earning_id: int, payload: FundMpContributionUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     require_home_member(home_group_id, user, db)
+    if payload.remember_origin:
+        raise HTTPException(status_code=400, detail="La asignación por origen está deshabilitada. Clasificá cada ingreso manualmente.")
     if payload.classification not in ("pending", "contribution", "excluded"):
         raise HTTPException(status_code=400, detail="Clasificación inválida")
     assignment = db.scalar(select(FundMpAssignment).where(FundMpAssignment.home_group_id == home_group_id, FundMpAssignment.earning_id == earning_id))
@@ -291,16 +293,6 @@ def update_mp_contribution(home_group_id: int, earning_id: int, payload: FundMpC
     assignment.contributor_user_id = payload.contributor_user_id if payload.classification == "contribution" else None
     assignment.updated_by_user_id = user.id
     assignment.updated_at = datetime.utcnow()
-    if payload.remember_origin:
-        if not assignment.stable_origin_id or assignment.contributor_user_id is None:
-            raise HTTPException(status_code=400, detail="No hay un identificador estable para recordar")
-        rule = db.scalar(select(FundMpOriginRule).where(FundMpOriginRule.integration_id == assignment.integration_id, FundMpOriginRule.stable_origin_id == assignment.stable_origin_id))
-        if rule is None:
-            db.add(FundMpOriginRule(home_group_id=home_group_id, integration_id=assignment.integration_id, stable_origin_id=assignment.stable_origin_id, user_id=assignment.contributor_user_id, created_by_user_id=user.id))
-        else:
-            rule.user_id = assignment.contributor_user_id
-        # This row now follows the same remembered rule as subsequent deposits.
-        assignment.updated_by_user_id = None
     log_action(db, home_group_id, user.id, "fund_mp_assign", "fund_mp_assignment", f"Ingreso MP clasificado como {payload.classification}", assignment.id)
     db.commit()
     return {"ok": True, "origin_remembered": payload.remember_origin}

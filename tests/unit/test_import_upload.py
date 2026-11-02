@@ -71,6 +71,37 @@ class ImportUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json(), parsed
 
+    def test_card_default_payer_is_header_owner_even_when_extension_uploads(self):
+        owner = User(email="owner@example.test", display_name="Alicia")
+        self.db.add(owner)
+        self.db.flush()
+        self.db.add(Membership(user_id=owner.id, home_group_id=self.home.id, role="member"))
+        self.db.commit()
+        statement = "Titular: PÉREZ ALICIA\n" + STATEMENT + "Consumos Alicia Perez\n25-Jul-26 COMPRA DEMO 2.000,00"
+        batch, _ = self._upload(statement)
+        self.assertEqual(batch["owner_name"], "PÉREZ ALICIA")
+        self.assertEqual(batch["default_paid_by_user_id"], owner.id)
+        response = self.client.post(f'/households/{self.home.id}/imports/{batch["id"]}/commit', json={
+            "line_ids": [line["id"] for line in batch["lines"]], "paid_by_user_id": batch["default_paid_by_user_id"],
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual({expense.paid_by_user_id for expense in self.db.scalars(select(Expense))}, {owner.id})
+        reopened = self.client.get(f'/households/{self.home.id}/imports/{batch["id"]}').json()
+        self.assertEqual(reopened["owner_name"], "PÉREZ ALICIA")
+        self.assertEqual(reopened["default_paid_by_user_id"], owner.id)
+
+    def test_missing_unknown_or_ambiguous_owner_falls_back_to_uploader(self):
+        for index, prefix in enumerate(["", "Titular: Persona Desconocida\n", "Titular: Demo Titular Otro\n"]):
+            with self.subTest(prefix=prefix):
+                if index == 2:
+                    other = User(email="other@example.test", display_name="Otro")
+                    self.db.add(other)
+                    self.db.flush()
+                    self.db.add(Membership(user_id=other.id, home_group_id=self.home.id, role="member"))
+                    self.db.commit()
+                batch, _ = self._upload(prefix + STATEMENT)
+                self.assertEqual(batch["default_paid_by_user_id"], self.user.id)
+
     def test_equal_card_charges_and_refund_are_all_preserved(self):
         batch, parsed = self._upload()
 
@@ -99,6 +130,11 @@ class ImportUploadTests(unittest.TestCase):
         first_lines = list(self.db.scalars(select(ImportLine).order_by(ImportLine.id)))
         first_lines[0].status = "committed"
         first_lines[2].status = "ignored"
+        self.db.add(Expense(
+            home_group_id=self.home.id, date=first_lines[0].date, description=first_lines[0].description,
+            paid_by_user_id=self.user.id, uploaded_by_user_id=self.user.id, source=ExpenseSource.import_pdf,
+            currency=Currency.ARS, original_amount=Decimal("1000"), amount_ars=Decimal("1000"), import_line_id=first_lines[0].id,
+        ))
         self.db.commit()
 
         second, _ = self._upload()

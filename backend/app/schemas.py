@@ -1,4 +1,4 @@
-from datetime import date as Date
+from datetime import date as Date, datetime
 from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -206,6 +206,8 @@ class ExpenseRead(ExpenseCreate):
     home_group_id: int
     uploaded_by_user_id: int
     amount_ars: Decimal
+    card_network: str | None = None
+    deleted_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -261,6 +263,8 @@ class ImportBatchRead(BaseModel):
     period_label: str | None
     statement_period: str | None = None
     card_network: str | None = None
+    owner_name: str | None = None
+    default_paid_by_user_id: int | None = None
     fx_rate_ars_per_usd: Decimal | None = None
     status: str
     created_at: str | None = None

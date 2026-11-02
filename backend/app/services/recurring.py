@@ -78,3 +78,21 @@ def sync_recurring_rule(db: Session, expense: Expense) -> None:
     existing.expected_amount = Decimal(expense.original_amount)
     existing.cadence = "monthly"
     existing.active = True
+
+
+def sync_recurring_after_removal(db: Session, expense: Expense) -> None:
+    pattern = recurring_pattern(expense.description)
+    candidates = db.scalars(select(Expense).where(
+        Expense.home_group_id == expense.home_group_id,
+        Expense.deleted_at.is_(None), Expense.is_recurring.is_(True),
+    ).order_by(Expense.date.desc(), Expense.id.desc()))
+    for candidate in candidates:
+        if recurring_pattern(candidate.description) == pattern:
+            sync_recurring_rule(db, candidate)
+            return
+    rule = db.scalar(select(RecurringRule).where(
+        RecurringRule.home_group_id == expense.home_group_id,
+        RecurringRule.description_pattern == pattern,
+    ))
+    if rule:
+        rule.active = False

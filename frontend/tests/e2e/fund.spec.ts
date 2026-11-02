@@ -297,8 +297,8 @@ test("a shared MP wallet attributes deposits to their real contributors", async 
   const mauroIncome = page.locator(".fund-mp-row").filter({ hasText: "Ingreso Mauro" });
   const micaIncome = page.locator(".fund-mp-row").filter({ hasText: "Ingreso Mica" });
   await expect(micaIncome).toContainText("Pagador: Mica");
-  await expect(micaIncome.locator("select")).toHaveValue("2");
-  await expect(micaIncome).toContainText("asignado por nombre (revisar)");
+  await expect(micaIncome.locator("select")).toHaveValue("pending");
+  await expect(micaIncome).toContainText("Pendiente de clasificación manual");
   const unknownIncome = page.locator(".fund-mp-row").filter({ hasText: "Ingreso desconocido" });
   await mauroIncome.locator("select").selectOption("1");
   await expect(mauroIncome.locator("select")).toHaveValue("1");
@@ -306,9 +306,7 @@ test("a shared MP wallet attributes deposits to their real contributors", async 
   await expect(micaIncome.locator("select")).toHaveValue("2");
   await unknownIncome.locator("select").selectOption("excluded");
   await expect(unknownIncome.locator("select")).toHaveValue("excluded");
-  await micaIncome.getByRole("button", { name: "Recordar origen" }).evaluate((button: HTMLButtonElement) => button.click());
-  await expect(page.getByRole("status")).toContainText("Origen recordado");
-  await expect(micaIncome).toContainText("asignado por origen recordado");
+  await expect(micaIncome).toContainText("Asignado manualmente");
   await expect(micaIncome.getByRole("button", { name: "Recordar origen" })).toHaveCount(0);
 
   const classified = await request.get(`${apiBase}/fund/summary?period=2026-06`, { headers: mauroHeaders });
@@ -323,10 +321,10 @@ test("a shared MP wallet attributes deposits to their real contributors", async 
   await page.reload();
   await page.getByRole("button", { name: "Fondo común" }).click();
   await page.getByLabel("Mes del fondo").fill("2026-06");
-  await expect(page.locator(".fund-mp-row").filter({ hasText: "Segundo ingreso Mica" }).locator("select")).toHaveValue("2");
+  await expect(page.locator(".fund-mp-row").filter({ hasText: "Segundo ingreso Mica" }).locator("select")).toHaveValue("pending");
   const updated = await request.get(`${apiBase}/fund/summary?period=2026-06`, { headers: mauroHeaders });
   const updatedSummary = await updated.json();
-  expect(updatedSummary.positions.find((row: { user_id: number }) => row.user_id === 2).contributed).toBe("20000.00");
+  expect(updatedSummary.positions.find((row: { user_id: number }) => row.user_id === 2).contributed).toBe("15000.00");
   expect(updatedSummary.totals.verified_balance).toBe("13000.00");
 
   const later = await request.post("http://127.0.0.1:8000/test/seed-fund-mp?phase=later-month");
@@ -345,10 +343,9 @@ test("a personal MP purchase is a separate owner outflow and not a shared expens
   await openFund(page, "2026-06");
   await page.getByLabel("Usar cuenta MP de Mauro para el fondo").evaluate((input: HTMLInputElement) => input.click());
   await expect(page.getByLabel("Usar cuenta MP de Mauro para el fondo")).toBeChecked();
-  // A confirmed manual pending classification must override the payer-name suggestion.
+  // New income stays pending even when the payer name matches a household member.
   const ownIncome = page.locator(".fund-mp-row").filter({ hasText: "Ingreso Mauro" });
-  await expect(ownIncome.locator("select")).toHaveValue("1");
-  await ownIncome.locator("select").selectOption("pending");
+  await expect(ownIncome.locator("select")).toHaveValue("pending");
   await expect(ownIncome.locator("select")).toHaveValue("pending");
   const initial = await fundSummary(request, "2026-06") as any;
   expect(initial.totals.shared_expenses).toBe("15000.00");

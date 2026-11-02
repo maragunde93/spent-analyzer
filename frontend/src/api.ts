@@ -131,6 +131,8 @@ export const api = {
     return request<DashboardSummary>(`/households/${homeId}/dashboard${params}`, undefined, demoDashboard);
   },
   expenses: (homeId: number) => request<Expense[]>(`/households/${homeId}/expenses`, undefined, demoExpenses),
+  deletedExpenses: (homeId: number) => request<Expense[]>(`/households/${homeId}/expenses/trash`),
+  restoreExpense: (homeId: number, expenseId: number) => request<Expense>(`/households/${homeId}/expenses/${expenseId}/restore`, { method: "POST" }),
   categories: (homeId: number) => request<Category[]>(`/households/${homeId}/categories`, undefined, categories),
   loadDefaultCategories: (homeId: number) =>
     request<Category[]>(

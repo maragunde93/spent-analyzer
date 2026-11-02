@@ -24,6 +24,7 @@ import {
   Save,
   SwatchBook,
   Trash2,
+  Undo2,
   Upload,
   UserCircle,
   WalletCards,
@@ -194,7 +195,7 @@ function downloadExpensesXls(expenses: Expense[], categories: Category[], users:
       users.find((item) => item.id === expense.paid_by_user_id)?.display_name ?? `Usuario #${expense.paid_by_user_id}`,
       category?.name ?? "Sin categoria",
       subcategory?.name ?? "",
-      sourceLabel(expense.source),
+      sourceLabel(expense.source, expense.card_network),
       expense.is_shared ? "Compartido" : "Personal",
       expense.is_recurring ? "Si" : "No",
       expense.currency,
@@ -358,7 +359,7 @@ function expenseSortValue(expense: Expense, key: ExpenseSortKey, categories: Cat
     description: expense.description,
     paid_by: user?.display_name ?? "",
     category: `${category?.name ?? "Sin categoria"} ${subcategory?.name ?? ""}`,
-    source: sourceLabel(expense.source),
+    source: sourceLabel(expense.source, expense.card_network),
     shared: expense.is_shared,
     recurring: !!expense.is_recurring,
     amount: Number(expense.original_amount),
@@ -372,6 +373,12 @@ function sortExpenses(expenses: Expense[], sort: ExpenseSort, categories: Catego
     if (comparison !== 0) return sort.direction === "asc" ? comparison : -comparison;
     return b.id - a.id;
   });
+}
+
+function refreshExpenseViews(queryClient: ReturnType<typeof useQueryClient>, homeId: number) {
+  for (const key of ["expenses", "expense-trash", "dashboard", "cash", "fund", "fund-series", "fund-mp-activity", "history", "imports", "members"]) {
+    queryClient.invalidateQueries({ queryKey: [key, homeId] });
+  }
 }
 
 function categoryDeltaRows(rows: Array<Record<string, string | number>>, keys: string[], loadedPeriods: string[]) {
@@ -458,15 +465,6 @@ function cardholderKey(line: Pick<ImportLine, "cardholder_name">) {
 
 function cardholderLabel(line: Pick<ImportLine, "cardholder_name">) {
   return line.cardholder_name?.trim() || "Titular";
-}
-
-function userIdForCardholder(name: string, users: User[], fallback: string) {
-  const normalizedName = name.toLowerCase();
-  const matched = users.find((user) => {
-    const display = user.display_name.toLowerCase();
-    return normalizedName.includes(display) || display.split(/\s+/).some((part) => part.length > 2 && normalizedName.includes(part));
-  });
-  return String(matched?.id ?? fallback);
 }
 
 function orderedImportLines(lines: ImportLine[], sourceType?: string) {
@@ -612,7 +610,7 @@ function sameStringArray(left: string[], right: string[]) {
 
 type ExpenseColumnFilters = {
   category: string;
-  source: "all" | ExpenseSource;
+  source: "all" | ExpenseSource | "import_pdf:visa" | "import_pdf:mastercard";
   recurring: "all" | "yes" | "no";
   dateFrom: string;
   dateTo: string;
@@ -660,27 +658,15 @@ export function App() {
   }, [homeId, mercadoPagoSyncing, queryClient]);
   const addExpense = useMutation({
     mutationFn: (expense: Partial<Expense>) => api.createExpense(homeId, expense),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["cash", homeId] });
-    }
+    onSuccess: () => refreshExpenseViews(queryClient, homeId)
   });
   const updateExpense = useMutation({
     mutationFn: ({ id, payload }: { id: number; payload: Partial<Expense> }) => api.updateExpense(homeId, id, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["cash", homeId] });
-    }
+    onSuccess: () => refreshExpenseViews(queryClient, homeId)
   });
   const deleteExpense = useMutation({
     mutationFn: (id: number) => api.deleteExpense(homeId, id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["expenses", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard", homeId] });
-      queryClient.invalidateQueries({ queryKey: ["cash", homeId] });
-    }
+    onSuccess: () => refreshExpenseViews(queryClient, homeId)
   });
   const logout = useMutation({
     mutationFn: api.logout,
@@ -706,7 +692,8 @@ export function App() {
         || (expenseColumnFilters.category === "uncategorized"
           ? expense.category_id === null || uncategorizedIds.has(expense.category_id)
           : String(expense.category_id) === expenseColumnFilters.category);
-      const matchesSource = expenseColumnFilters.source === "all" || expense.source === expenseColumnFilters.source;
+      const matchesSource = expenseColumnFilters.source === "all" || expense.source === expenseColumnFilters.source
+        || `${expense.source}:${expense.card_network}` === expenseColumnFilters.source;
       const matchesRecurring = expenseColumnFilters.recurring === "all" || !!expense.is_recurring === (expenseColumnFilters.recurring === "yes");
       const matchesDate = (!expenseColumnFilters.dateFrom || expense.date >= expenseColumnFilters.dateFrom)
         && (!expenseColumnFilters.dateTo || expense.date <= expenseColumnFilters.dateTo);
@@ -777,6 +764,7 @@ export function App() {
         )}
         {section === "expenses" && (
           <Expenses
+            homeId={homeId}
             categories={cats}
             expenses={filteredExpenses}
             users={people}
@@ -1869,6 +1857,7 @@ function CategoryLegend({
 }
 
 function Expenses(props: {
+  homeId: number;
   categories: Category[];
   expenses: Expense[];
   users: User[];
@@ -1888,6 +1877,7 @@ function Expenses(props: {
   onDelete: (id: number) => void;
 }) {
   const [expenseDate, setExpenseDate] = useState(() => currentDateInputValue());
+  const [showTrash, setShowTrash] = useState(false);
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [notes, setNotes] = useState("");
@@ -1901,6 +1891,7 @@ function Expenses(props: {
   const [editingExpenseId, setEditingExpenseId] = useState<number | null>(null);
   const [editDescription, setEditDescription] = useState("");
   const [editAmount, setEditAmount] = useState("");
+  const [editPaidByUserId, setEditPaidByUserId] = useState("");
   const [editCategoryId, setEditCategoryId] = useState("");
   const [editSubcategoryId, setEditSubcategoryId] = useState("");
   const [editNotes, setEditNotes] = useState("");
@@ -1955,6 +1946,7 @@ function Expenses(props: {
     setEditingExpenseId(expense.id);
     setEditDescription(expense.description);
     setEditAmount(String(expense.original_amount));
+    setEditPaidByUserId(String(expense.paid_by_user_id));
     setEditCategoryId(expense.category_id ? String(expense.category_id) : "");
     setEditSubcategoryId(expense.subcategory_id ? String(expense.subcategory_id) : "");
     setEditNotes(expense.notes ?? "");
@@ -1963,6 +1955,8 @@ function Expenses(props: {
   };
   return (
     <section className="stack">
+      <div className="toolbar"><button type="button" className="primary" aria-expanded={showTrash} onClick={() => setShowTrash(!showTrash)}><Trash2 size={16} />{showTrash ? "Ocultar papelera" : "Ver papelera"}</button></div>
+      {showTrash && <ExpenseTrash homeId={props.homeId} users={props.users} />}
       <div className="expense-layout">
         <div className="expense-side">
           <div className="panel form-panel expense-filter-panel">
@@ -1995,6 +1989,8 @@ function Expenses(props: {
                 onChange={(event) => props.setColumnFilters({ ...props.columnFilters, source: event.target.value as ExpenseColumnFilters["source"] })}>
                 <option value="all">Todos</option>
                 {expenseSources.map((source) => <option key={source} value={source}>{sourceLabel(source)}</option>)}
+                <option value="import_pdf:visa">Credito Visa</option>
+                <option value="import_pdf:mastercard">Credito Mastercard</option>
               </select>
             </label>
             <label>
@@ -2212,7 +2208,11 @@ function Expenses(props: {
                                 />
                               ) : expense.description}
                             </td>
-                            <td>{props.users.find((u) => u.id === expense.paid_by_user_id)?.display_name ?? "Usuario"}</td>
+                            <td>{isEditing ? (
+                              <select value={editPaidByUserId} onChange={(event) => setEditPaidByUserId(event.target.value)} aria-label={`Editar pagador ${expense.description}`}>
+                                {props.users.map((user) => <option key={user.id} value={user.id}>{user.display_name}</option>)}
+                              </select>
+                            ) : props.users.find((u) => u.id === expense.paid_by_user_id)?.display_name ?? "Usuario"}</td>
                             <td className="category-cell">
                               {isEditing ? (
                                 <div className="inline-edit-fields">
@@ -2246,7 +2246,7 @@ function Expenses(props: {
                                 </span>
                               )}
                             </td>
-                            <td className="source-cell"><span className="source-label">{sourceLabel(expense.source)}</span></td>
+                            <td className="source-cell"><span className="source-label">{sourceLabel(expense.source, expense.card_network)}</span></td>
                             <td className="shared-cell">
                               {isEditing ? (
                                 <label className="check-row form-check edit-shared-check">
@@ -2302,6 +2302,7 @@ function Expenses(props: {
                                         category_id: editCategoryId ? Number(editCategoryId) : null,
                                         subcategory_id: editSubcategoryId ? Number(editSubcategoryId) : null,
                                         original_amount: editAmount,
+                                        paid_by_user_id: Number(editPaidByUserId),
                                         notes: editNotes.trim() || null,
                                         is_recurring: editIsRecurring,
                                         is_shared: editIsShared
@@ -2325,7 +2326,7 @@ function Expenses(props: {
                                     title="Eliminar gasto"
                                     aria-label={`Eliminar gasto ${expense.description}`}
                                     onClick={() => {
-                                      if (window.confirm(`Eliminar el gasto "${expense.description}"?`)) {
+                                      if (window.confirm(`Mover el gasto "${expense.description}" a la papelera? Podés restaurarlo desde allí.`)) {
                                         props.onDelete(expense.id);
                                       }
                                     }}
@@ -2351,6 +2352,35 @@ function Expenses(props: {
   );
 }
 
+function ExpenseTrash({ homeId, users }: { homeId: number; users: User[] }) {
+  const queryClient = useQueryClient();
+  const trash = useQuery({ queryKey: ["expense-trash", homeId], queryFn: () => api.deletedExpenses(homeId) });
+  const restore = useMutation({
+    mutationFn: (expenseId: number) => api.restoreExpense(homeId, expenseId),
+    onSuccess: () => refreshExpenseViews(queryClient, homeId)
+  });
+  return <div className="panel table-panel" aria-label="Papelera de consumos">
+    <h2>Papelera</h2>
+    <p className="muted">Estos consumos no cuentan en los totales. Volver a importar o sincronizar no los restaura.</p>
+    <p className="muted">Los consumos importados que se borraron antes de incorporar la papelera se recuperan volviendo a importar su archivo o sincronizando su período.</p>
+    {trash.isLoading ? <p>Cargando papelera...</p> : trash.isError ? <p className="form-error">{trash.error.message}</p> : !trash.data?.length ? <p>La papelera está vacía.</p> : (
+      <div className="expense-trash-list">
+        {trash.data.map((expense) => (
+          <div className="expense-trash-row" key={expense.id}>
+            <div className="expense-trash-details">
+              <strong>{expense.description}</strong>
+              <small>{expense.date} · {users.find((user) => user.id === expense.paid_by_user_id)?.display_name ?? "Usuario"} · {sourceLabel(expense.source, expense.card_network)}</small>
+              <span>{money(expense.original_amount, expense.currency)}</span>
+            </div>
+            <button type="button" className="primary" disabled={restore.isPending} onClick={() => restore.mutate(expense.id)} aria-label={`Restaurar ${expense.description}`}><Undo2 size={16} />Restaurar</button>
+          </div>
+        ))}
+      </div>
+    )}
+    {restore.isError && <p className="form-error">{restore.error.message}</p>}
+  </div>;
+}
+
 function Imports({ categories, users, currentUser, homeId }: { categories: Category[]; users: User[]; currentUser: User; homeId: number }) {
   const [batch, setBatch] = useState<ImportBatch | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
@@ -2370,10 +2400,11 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
   const pendingImports = useQuery({ queryKey: ["imports", homeId, "parsed"], queryFn: () => api.imports(homeId, "parsed") });
   const loadBatch = (data: ImportBatch) => {
     const savedDescriptions = data.source_type === "bbva_account_xls" ? storedImportDescriptions(homeId, data.id) : {};
-    const holderPayers = Object.fromEntries(Array.from(new Set(data.lines.map(cardholderKey))).map((holder) => [holder, userIdForCardholder(holder, users, String(currentUser.id))]));
+    const defaultPayer = String(data.source_type === "bbva_account_xls" ? currentUser.id : data.default_paid_by_user_id ?? data.uploaded_by_user_id);
+    const holderPayers = Object.fromEntries(Array.from(new Set(data.lines.map(cardholderKey))).map((holder) => [holder, defaultPayer]));
     setBatch(data);
-    setPaidByUserId(String(currentUser.id));
-    setSelected(data.lines.filter((line) => line.status === "pending" && line.duplicate_status !== "already_committed" && !isIgnoredImportLine(line)).map((line) => line.id));
+    setPaidByUserId(defaultPayer);
+    setSelected(data.lines.filter(isSelectableImportLine).map((line) => line.id));
     setCategoryByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_category_id])));
     setSubcategoryByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_subcategory_id])));
     setRecurringByLine(Object.fromEntries(data.lines.map((line) => [line.id, line.suggested_recurring])));
@@ -2505,7 +2536,8 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
   }, {}) ?? {};
   const visibleDuplicateCounts = {
     previously_parsed: batch?.source_type === "bbva_account_xls" ? 0 : duplicateCounts.previously_parsed ?? 0,
-    already_committed: duplicateCounts.already_committed ?? 0
+    already_committed: duplicateCounts.already_committed ?? 0,
+    deleted: duplicateCounts.deleted ?? 0
   };
   return (
     <section className="stack">
@@ -2582,6 +2614,7 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
       {(uploadCard.isPending || uploadAccount.isPending) && <div className="panel">Parseando resumen...</div>}
       {batch && (
         <div className="panel table-panel" data-testid={`active-import-${batch.id}`}>
+          {visibleDuplicateCounts.deleted > 0 && <div className="warning">{visibleDuplicateCounts.deleted} consumo(s) están en la papelera. Para recuperarlos, entrá a Consumos → Ver papelera y elegí Restaurar.</div>}
           {(visibleDuplicateCounts.previously_parsed > 0 || visibleDuplicateCounts.already_committed > 0) && (
             <div className="warning">
               {visibleDuplicateCounts.previously_parsed ? `${visibleDuplicateCounts.previously_parsed} lineas ya habian sido parseadas pero no convertidas. ` : ""}
@@ -2604,6 +2637,7 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
                 Consumos a revisar: <strong>{reviewCount}</strong>
               </div>
               {batch.source_type === "bbva_account_xls" && <small className="muted">Las descripciones editadas se guardan en este navegador hasta procesar la carga.</small>}
+              {batch.source_type === "bbva_visa_pdf" && <small className="muted">{batch.owner_name ? `Titular detectado: ${batch.owner_name}. ` : "Titular no detectado. "}Pagador predeterminado: {users.find((user) => user.id === (batch.default_paid_by_user_id ?? batch.uploaded_by_user_id))?.display_name ?? "quien cargó el resumen"}. Podés cambiarlo para cada grupo de consumos.</small>}
               {!!invalidDescriptionCount && <small className="form-error">Completá la descripción de {invalidDescriptionCount} movimiento(s) seleccionado(s).</small>}
             </div>
             <div className="toolbar compact">
@@ -2623,7 +2657,15 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
                   />
                 </label>
               )}
-              <select value={paidByUserId} onChange={(e) => setPaidByUserId(e.target.value)} aria-label="Pagador del resumen">
+              <select value={paidByUserId} onChange={(e) => {
+                const nextPayer = e.target.value;
+                setPaidByUserId(nextPayer);
+                setPaidByByHolder(Object.fromEntries(batch.lines.map((line) => [cardholderKey(line), nextPayer])));
+                if (batch.card_network === "mastercard") {
+                  const payerIsMauro = users.find((user) => String(user.id) === nextPayer)?.display_name.toUpperCase().includes("MAURO") ?? false;
+                  setSharedByLine((current) => ({ ...current, ...Object.fromEntries(batch.lines.filter((line) => !sharedTouchedByLine[line.id]).map((line) => [line.id, payerIsMauro || line.suggested_shared])) }));
+                }
+              }} aria-label="Pagador del resumen">
                 {users.map((u) => <option value={u.id} key={u.id}>{u.display_name}</option>)}
               </select>
               <button className="primary" disabled={!selected.length || !!invalidDescriptionCount || commit.isPending || updateBatch.isPending} onClick={() => commit.mutate()}>
@@ -2636,8 +2678,7 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
             <tbody>
               {reviewLines.map((line, index) => {
                 const selectedCategory = categories.find((category) => category.id === categoryByLine[line.id]);
-                const isIgnoredCardPayment = isIgnoredImportLine(line);
-                const isLineDisabled = isIgnoredCardPayment || line.status !== "pending";
+                const isLineDisabled = !isSelectableImportLine(line);
                 const hidePreviouslyParsed = batch.source_type === "bbva_account_xls" && line.duplicate_status === "previously_parsed";
                 const showDuplicateWarning = line.duplicate_status !== "new" && !hidePreviouslyParsed;
                 const showMonthSeparator = batch.source_type === "bbva_account_xls" && (index === 0 || importLinePeriod(reviewLines[index - 1]) !== importLinePeriod(line));
@@ -2697,7 +2738,7 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
                               {copiedHolder === holderKey && <span className="copy-feedback">Copiado</span>}
                               <button
                                 className="person-action-control"
-                                onClick={() => setSelected((current) => Array.from(new Set([...current, ...holderLines.filter((item) => item.status === "pending" && !isIgnoredImportLine(item)).map((item) => item.id)])))}
+                                onClick={() => setSelected((current) => Array.from(new Set([...current, ...holderLines.filter(isSelectableImportLine).map((item) => item.id)])))}
                                 type="button"
                               >
                                 Seleccionar persona
@@ -2737,7 +2778,7 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
                           type="checkbox"
                           checked={selected.includes(line.id)}
                           disabled={isLineDisabled}
-                          title={isLineDisabled ? ignoredImportReason(line) : undefined}
+                          title={line.duplicate_status === "deleted" ? "Restaurar desde Papelera" : isLineDisabled ? ignoredImportReason(line) : undefined}
                           onChange={(event) => {
                             setSelected((current) =>
                               event.target.checked ? [...current, line.id] : current.filter((id) => id !== line.id)
@@ -2855,7 +2896,7 @@ function Imports({ categories, users, currentUser, homeId }: { categories: Categ
                       <td>
                         <span className={isLineDisabled || showDuplicateWarning || !categoryByLine[line.id] ? "status warning-status" : "status"}>
                           {!isLineDisabled && !categoryByLine[line.id] ? <AlertTriangle size={14} /> : null}
-                          {!isLineDisabled && !categoryByLine[line.id] ? "Revisar categoria" : isLineDisabled ? ignoredImportReason(line) : hidePreviouslyParsed ? "Lista" : duplicateLabel(line.duplicate_status)}
+                          {line.duplicate_status === "deleted" ? "En papelera" : line.duplicate_status === "already_committed" ? "Ya convertida" : !isLineDisabled && !categoryByLine[line.id] ? "Revisar categoria" : isLineDisabled ? ignoredImportReason(line) : hidePreviouslyParsed ? "Lista" : duplicateLabel(line.duplicate_status)}
                         </span>
                       </td>
                     </tr>
@@ -3354,7 +3395,6 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
   const [movement, setMovement] = useState(() => ({ date: periodEndDate(period), from: "", to: "fund", amount: "", note: "" }));
   const [editingMovementId, setEditingMovementId] = useState<number | null>(null);
   const [mpSelectedMonthOnly, setMpSelectedMonthOnly] = useState(false);
-  const [mpOriginNotice, setMpOriginNotice] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const fund = useQuery({ queryKey: ["fund", homeId, period], queryFn: () => api.fundSummary(homeId, period) });
   const series = useQuery({ queryKey: ["fund-series", homeId], queryFn: () => api.fundSeries(homeId) });
@@ -3436,12 +3476,9 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
   });
   const deleteMovement = useMutation({ mutationFn: (id: number) => api.deleteFundMovement(homeId, id), onSuccess: refresh });
   const classifyMp = useMutation({
-    mutationFn: ({ earningId, classification, contributorId, remember }: { earningId: number; classification: string; contributorId: number | null; remember?: boolean }) =>
-      api.updateFundMpContribution(homeId, earningId, { classification, contributor_user_id: contributorId, remember_origin: remember }),
-    onSuccess: (_result, variables) => {
-      refresh();
-      setMpOriginNotice(variables.remember ? "Origen recordado. Se aplicó también a los demás ingresos de ese origen sin clasificación manual." : null);
-    }
+    mutationFn: ({ earningId, classification, contributorId }: { earningId: number; classification: string; contributorId: number | null }) =>
+      api.updateFundMpContribution(homeId, earningId, { classification, contributor_user_id: contributorId }),
+    onSuccess: refresh
   });
   const markMpShared = useMutation({
     mutationFn: (expenseId: number) => api.updateExpense(homeId, expenseId, { is_shared: true }),
@@ -3575,8 +3612,7 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
           </label>; })}
         </div>
         <p className="muted fund-mp-explainer">Las compras nuevas de una cuenta MP del fondo se importan como compartidas por defecto. Las compras personales anteriores o excepcionales se pueden corregir aquí o en Consumos.</p>
-        <div className="fund-mp-subheading"><div><h3>Ingresos a las cuentas del fondo</h3><HelpHint text="Se muestran ingresos de todos los meses de las cuentas MP activadas. Se asignan por un origen recordado o, si coincide un único integrante, por nombre de pagador; esta última coincidencia conviene revisarla. Si no hay datos suficientes, elegí el aportante o dejalo pendiente. Excluir evita contarlo como dinero del fondo." /></div><label><input type="checkbox" checked={mpSelectedMonthOnly} onChange={(event) => setMpSelectedMonthOnly(event.target.checked)} /> Sólo {monthLabel(period)}</label></div>
-        {mpOriginNotice && <p className="fund-own-callout" role="status">{mpOriginNotice}</p>}
+        <div className="fund-mp-subheading"><div><h3>Ingresos a las cuentas del fondo</h3><HelpHint text="Se muestran ingresos de todos los meses de las cuentas MP activadas. Los ingresos nuevos quedan pendientes hasta que elijas manualmente el aportante. Las asignaciones anteriores se conservan y pueden corregirse. Excluir evita contarlo como dinero del fondo." /></div><label><input type="checkbox" checked={mpSelectedMonthOnly} onChange={(event) => setMpSelectedMonthOnly(event.target.checked)} /> Sólo {monthLabel(period)}</label></div>
         {mpActivity.isLoading ? <p className="muted">Cargando movimientos MP…</p> : mpActivity.isError ? <p className="form-error">{mpActivity.error.message}</p> : mpIncomes.length ? (
           <div className="fund-mp-list">{mpIncomes.map((item) => (
             <div className="fund-mp-row" key={item.earning_id}>
@@ -3584,10 +3620,9 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
                 <strong>{item.description}</strong>
                 <small>{item.date} · cuenta de {item.account_name ?? "titular"} · {money(item.amount_ars)}</small>
                 <small>{item.payer_name ? `Pagador: ${item.payer_name}` : "Pagador no informado"}{item.payer_document_suffix ? ` · documento ••••${item.payer_document_suffix}` : ""}{item.payment_method_type ? ` · ${item.payment_method_type}` : ""}</small>
-                <small>{item.stable_origin_id ? `Origen verificable: ${item.stable_origin_id}` : "Origen sin identificar"}{item.assignment_source === "rule" ? " · asignado por origen recordado" : item.assignment_source === "payer_name" ? " · asignado por nombre (revisar)" : item.assignment_source === "manual" ? " · asignado manualmente" : ""}</small>
+                <small>{item.assignment_source === "manual" ? "Asignado manualmente" : item.assignment_source ? "Asignación automática anterior (revisar)" : item.classification === "excluded" ? "Excluido del fondo" : "Pendiente de clasificación manual"}</small>
               </div>
               <select aria-label={`Clasificar ${item.description}`} value={item.classification === "contribution" ? String(item.contributor_user_id) : item.classification} disabled={classifyMp.isPending} onChange={(event) => {
-                setMpOriginNotice(null);
                 const value = event.target.value;
                 classifyMp.mutate({ earningId: item.earning_id, classification: /^\d+$/.test(value) ? "contribution" : value, contributorId: /^\d+$/.test(value) ? Number(value) : null });
               }}>
@@ -3595,7 +3630,6 @@ function HouseholdFund({ users, currentUser, homeId }: { users: User[]; currentU
                 {users.map((member) => <option key={member.id} value={member.id}>Aporte de {member.display_name}</option>)}
                 <option value="excluded">Excluir</option>
               </select>
-              {item.classification === "contribution" && item.can_remember_origin && <button className="mp-sync-button" type="button" disabled={classifyMp.isPending} onClick={() => classifyMp.mutate({ earningId: item.earning_id, classification: "contribution", contributorId: item.contributor_user_id, remember: true })}>Recordar origen</button>}
             </div>
           ))}</div>
         ) : <p className="muted">No hay ingresos de cuentas MP del fondo {mpSelectedMonthOnly ? "en este mes" : "todavía"}.</p>}
@@ -3966,7 +4000,9 @@ function SettingsPanel({ categories, users, homeId }: { categories: Category[]; 
   );
 }
 
-function sourceLabel(source: ExpenseSource) {
+function sourceLabel(source: ExpenseSource, cardNetwork?: string | null) {
+  if (source === "import_pdf" && cardNetwork === "visa") return "Credito Visa";
+  if (source === "import_pdf" && cardNetwork === "mastercard") return "Credito Mastercard";
   return { manual: "Manual", import_pdf: "Credito", bank_import: "Cuenta", mercadopago: "Debito MercadoPago", cash: "Efectivo", transfer: "Transferencia", other: "Otro" }[source];
 }
 
@@ -3997,7 +4033,11 @@ function kindLabel(kind: string) {
 }
 
 function duplicateLabel(status: string) {
-  return { new: "Nueva", previously_parsed: "Parseada antes", already_committed: "Ya convertida" }[status] ?? status;
+  return { new: "Nueva", previously_parsed: "Parseada antes", already_committed: "Ya convertida", deleted: "En papelera" }[status] ?? status;
+}
+
+function isSelectableImportLine(line: ImportLine) {
+  return line.status === "pending" && line.duplicate_status !== "already_committed" && line.duplicate_status !== "deleted" && !isIgnoredImportLine(line);
 }
 
 function isIgnoredImportKind(kind: string) {
@@ -4019,6 +4059,7 @@ function actionLabel(action: string) {
     expense_create: "Gasto creado",
     expense_update: "Gasto editado",
     expense_delete: "Gasto eliminado",
+    expense_restore: "Gasto restaurado",
     member_update: "Usuario editado",
     member_delete: "Usuario eliminado",
     import_upload: "Statement cargado",
