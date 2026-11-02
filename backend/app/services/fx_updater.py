@@ -90,7 +90,7 @@ def update_blue_rate(
 
 
 def recalculate_usd_expenses_with_rate(db: Session, rate: Decimal) -> int:
-    expenses = list(db.scalars(select(Expense).where(Expense.currency == Currency.USD)))
+    expenses = list(db.scalars(select(Expense).where(Expense.currency == Currency.USD, Expense.deleted_at.is_(None))))
     for expense in expenses:
         expense.amount_ars = (Decimal(expense.original_amount) * rate).quantize(Decimal("0.01"))
     db.commit()

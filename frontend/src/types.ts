@@ -166,6 +166,8 @@ export type Expense = {
   paid_by_user_id: number;
   uploaded_by_user_id: number;
   source: ExpenseSource;
+  card_network?: string | null;
+  deleted_at?: string | null;
   currency: Currency;
   original_amount: string;
   amount_ars: string;
@@ -243,7 +245,7 @@ export type ImportLine = {
   suggested_shared: boolean;
   notes?: string | null;
   status: string;
-  duplicate_status: "new" | "previously_parsed" | "already_committed";
+  duplicate_status: "new" | "previously_parsed" | "already_committed" | "deleted";
 };
 
 export type ImportBatch = {
@@ -255,6 +257,8 @@ export type ImportBatch = {
   period_label: string | null;
   statement_period: string | null;
   card_network: string | null;
+  owner_name?: string | null;
+  default_paid_by_user_id?: number | null;
   fx_rate_ars_per_usd: string | null;
   status: string;
   created_at: string | null;

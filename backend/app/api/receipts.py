@@ -53,7 +53,7 @@ async def upload_receipt(
     logger.info("receipt_upload_start home_group_id=%s user_id=%s files=%s expense_id=%s", home_group_id, user.id, len(files), expense_id)
     if expense_id is not None:
         expense = db.get(Expense, expense_id)
-        if expense is None or expense.home_group_id != home_group_id:
+        if expense is None or expense.home_group_id != home_group_id or expense.deleted_at is not None:
             logger.warning("receipt_upload_expense_ignored home_group_id=%s user_id=%s expense_id=%s", home_group_id, user.id, expense_id)
             expense_id = None
     upload_paths: list[tuple[Path, str | None]] = []
@@ -182,7 +182,7 @@ def associate_receipt(
     if receipt is None or receipt.home_group_id != home_group_id:
         raise HTTPException(status_code=404, detail="Ticket no encontrado")
     expense = db.get(Expense, payload.expense_id)
-    if expense is None or expense.home_group_id != home_group_id:
+    if expense is None or expense.home_group_id != home_group_id or expense.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
     category_id = _valid_category_id(home_group_id, payload.category_id, db) if payload.category_id else receipt.category_id
     receipt.expense_id = expense.id

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import unicodedata
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -158,39 +157,17 @@ def ensure_mp_assignments(db: Session, home_group_id: int) -> list[FundMpAssignm
             )
         )
     }
-    rules = {
-        (item.integration_id, item.stable_origin_id): item
-        for item in db.scalars(select(FundMpOriginRule).where(FundMpOriginRule.home_group_id == home_group_id))
-    }
-    member_names = {
-        user.id: user.display_name
-        for user in db.scalars(
-            select(User).join(Membership, Membership.user_id == User.id)
-            .where(Membership.home_group_id == home_group_id)
-        )
-    }
     for earning, line, _batch, integration in rows:
         origin = line.mercadopago_origin_id
-        rule = rules.get((integration.id, origin)) if origin else None
-        try:
-            raw = json.loads(line.raw_text) if line.raw_text else {}
-        except (TypeError, ValueError):
-            raw = {}
-        payer_name = raw.get("PAYER_NAME") if isinstance(raw, dict) else None
-        inferred_user_id = rule.user_id if rule else _member_for_payer_name(payer_name, member_names)
         if earning.id in existing:
             assignment = existing[earning.id]
             if assignment.stable_origin_id != origin:
                 assignment.stable_origin_id = origin
-            if assignment.updated_by_user_id is None:
-                assignment.classification = "contribution" if inferred_user_id else "pending"
-                assignment.contributor_user_id = inferred_user_id
-                db.flush()
             continue
         values = {
             "home_group_id": home_group_id, "earning_id": earning.id, "integration_id": integration.id,
-            "contributor_user_id": inferred_user_id,
-            "classification": "contribution" if inferred_user_id else "pending", "stable_origin_id": origin,
+            "contributor_user_id": None,
+            "classification": "pending", "stable_origin_id": origin,
         }
         dialect = db.get_bind().dialect.name
         if dialect == "sqlite":
@@ -204,30 +181,8 @@ def ensure_mp_assignments(db: Session, home_group_id: int) -> list[FundMpAssignm
     return list(existing.values())
 
 
-def _member_for_payer_name(payer_name: object, member_names: dict[int, str]) -> int | None:
-    if not isinstance(payer_name, str):
-        return None
-    def tokens(value: str) -> list[str]:
-        normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
-        return re.findall(r"[a-z]+", normalized)
-
-    payer_tokens = tokens(payer_name)
-    if not payer_tokens:
-        return None
-    matches = []
-    for user_id, display_name in member_names.items():
-        member_tokens = tokens(display_name)
-        # A unique, at least four-letter first-name prefix covers Mica/Micaela.
-        # Any displayed surname must match a whole payer token.
-        if member_tokens and len(member_tokens[0]) >= 4 and payer_tokens[0].startswith(member_tokens[0]) and all(
-            token in payer_tokens[1:] for token in member_tokens[1:]
-        ):
-            matches.append(user_id)
-    return matches[0] if len(matches) == 1 else None
-
-
 def _all_expenses(db: Session, home_group_id: int) -> tuple[list[Expense], dict[int, tuple[ImportLine | None, ImportBatch | None, MercadoPagoIntegration | None]]]:
-    expenses = list(db.scalars(select(Expense).where(Expense.home_group_id == home_group_id).order_by(Expense.date, Expense.id)))
+    expenses = list(db.scalars(select(Expense).where(Expense.home_group_id == home_group_id, Expense.deleted_at.is_(None)).order_by(Expense.date, Expense.id)))
     return expenses, expense_fund_context(db, expenses)
 
 
@@ -623,7 +578,7 @@ def _mp_contribution_rows(db: Session, home_group_id: int, assignments: list[Fun
             "assignment_id": item.id, "earning_id": earning.id, "date": earning.date.isoformat(), "description": earning.description,
             "amount_ars": str(money(earning.amount_ars)), "classification": classification,
             "contributor_user_id": item.contributor_user_id, "contributor_name": names.get(item.contributor_user_id),
-            "stable_origin_id": item.stable_origin_id, "can_remember_origin": bool(item.stable_origin_id) and not remembered,
+            "stable_origin_id": item.stable_origin_id, "can_remember_origin": False,
             "payer_name": payer_name,
             "payer_document_suffix": payer_document[-4:] if payer_document else None,
             "payment_method_type": str(raw.get("PAYMENT_METHOD_TYPE") or "").strip() or None,

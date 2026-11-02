@@ -30,7 +30,7 @@ def dashboard(
 ) -> DashboardSummary:
     require_home_member(home_group_id, user, db)
     category_filter_ids = category_ids if isinstance(category_ids, list) else []
-    stmt = select(Expense).where(Expense.home_group_id == home_group_id)
+    stmt = select(Expense).where(Expense.home_group_id == home_group_id, Expense.deleted_at.is_(None))
     if start:
         stmt = stmt.where(Expense.date >= start)
     if end:
@@ -305,6 +305,7 @@ def _recent_card_statement_scope(
             ImportBatch.source_type != "bbva_account_xls",
             Expense.home_group_id == home_group_id,
             Expense.source == ExpenseSource.import_pdf,
+            Expense.deleted_at.is_(None),
         )
     )
     if paid_by_user_id:
@@ -339,6 +340,7 @@ def _recent_card_statement_scopes(
             ImportBatch.source_type != "bbva_account_xls",
             Expense.home_group_id == home_group_id,
             Expense.source == ExpenseSource.import_pdf,
+            Expense.deleted_at.is_(None),
         )
     )
     if paid_by_user_id:
@@ -421,6 +423,7 @@ def _card_statement_periods(db: Session, home_group_id: int, paid_by_user_id: in
             ImportBatch.source_type != "bbva_account_xls",
             Expense.home_group_id == home_group_id,
             Expense.source == ExpenseSource.import_pdf,
+            Expense.deleted_at.is_(None),
         )
     )
     if paid_by_user_id:

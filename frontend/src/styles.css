@@ -801,6 +801,18 @@ textarea {
 .table-panel { overflow: auto; }
 .expense-movements { min-width: 0; overflow: hidden; }
 .expense-table-scroll { overflow-x: auto; }
+.expense-trash-list { display: grid; gap: 12px; }
+.expense-trash-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid #1e293b;
+  padding-top: 14px;
+}
+.expense-trash-details { display: grid; flex: 1 1 220px; min-width: 0; gap: 6px; overflow-wrap: anywhere; }
+.expense-trash-details small { color: #94a3b8; }
 .expense-movements .table-heading { flex-wrap: wrap; }
 .expense-movements .table-heading > div { min-width: 0; }
 .table-heading {

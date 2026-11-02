@@ -1,6 +1,6 @@
 # Codex Context - Spent Analyzer
 
-Last updated: 2026-09-18
+Last updated: 2026-11-02
 
 Use this file as the compact handoff context for future Codex threads. Start new work by reading this file, then inspect only the files relevant to the requested task. Update this file when a feature or fix changes durable product behavior, data contracts, workflow rules, testing expectations, or operational knowledge that future Codex threads should inherit.
 
@@ -146,7 +146,7 @@ Tests:
 - expenses E2E flows in `frontend/tests/e2e/app.spec.ts`
 
 Special rule:
-- Deleting a Mercado Pago expense must also remove its unreferenced `ImportLine`. The importer also detects old stale fingerprints that no longer reference an expense or earning, removes them, and recreates the movement on the next sync. Do not simplify this into unconditional duplicate rejection.
+- Deleting any expense sets `deleted_at` and preserves the expense, its import line and receipt associations. Restore is manual from Consumos > Ver papelera; reimport/sync must never restore it. The MP importer still removes old orphan committed fingerprints (from historical hard deletion) and recreates those movements on the next sync.
 
 ### Mercado Pago
 
@@ -196,7 +196,7 @@ Durable behavior:
 - Editing a Mercado Pago expense learns an explicitly changed description plus submitted category/subcategory/recurrent values into a household-wide merchant rule. Rules affect only future imports; duplicate sync may backfill identity but must not alter historical expenses or overwrite manually edited descriptions.
 - Expense descriptions are editable for every source, trimmed, non-empty, and limited to 240 characters. Learned description replacement is Mercado Pago-only for now.
 - New Mercado Pago expenses have empty notes. Existing generated notes are deliberately not migrated.
-- Deleted Mercado Pago expenses must be importable again; an orphan committed import line is stale state, not a valid duplicate.
+- Trashed Mercado Pago expenses remain deleted across sync and can only be restored manually. Historical hard-deleted expenses are still importable again; an orphan committed import line is stale state, not a valid duplicate.
 - Local HTTP debug logging may include personal response data even though credentials are redacted. It must remain disabled in production.
 
 ### Categories / Subcategories / Casa
@@ -401,6 +401,11 @@ Important fields:
 
 No equal split logic exists. Reports can filter by payer/uploader/category/date, but paid totals remain per payer.
 
+- The payer is editable for expenses from every source and must belong to the household.
+- Trashed expenses are excluded from active listings, dashboard totals/recurrence, household fund and cash balances. Deleting removes their cash entry and disables a recurring rule only when no active recurring expense matches it. Restore keeps the same expense ID and metadata, reinstates cash once, updates recurrence and emits an audit event. FX updates skip trashed expenses.
+- Expense responses expose `card_network` from the linked statement; Consumos displays and filters Crédito Visa / Crédito Mastercard and includes the network in XLS exports. Legacy statements without network metadata keep the generic Crédito label.
+- New common-fund Mercado Pago income assignments are always pending until manually classified. Names, document fingerprints and historical origin rules must never assign or reassign contributors. Existing assignments (including historical automatic ones) are preserved. Remember-origin writes are disabled; stored rules remain only for historical attribution display.
+
 Shared-scope behavior:
 - Historical expenses are migrated as personal (`is_shared = false`).
 - New expenses can be marked shared/personal during manual creation, editing, and import review.
@@ -428,10 +433,11 @@ It ignores:
 - previous card payments (`SU PAGO EN PESOS`, `SU PAGO EN USD`) by default
 
 Multi-cardholder behavior:
+- The parser extracts `owner_name` from the postal header or an explicit owner label, never from consumption-section order. The name is persisted on `ImportBatch` and matched uniquely against household members with normalized name tokens. `default_paid_by_user_id` falls back to the batch uploader when missing/unknown/ambiguous; all cardholder groups start with that payer. Historical pending batches lacking owner metadata use their uploader. Account XLS review still defaults to the currently authenticated user.
 - Each import line may have `cardholder_name`.
 - UI groups card statements by person.
 - Same repeated cardholder name should be treated as the same person.
-- Each person group can have its own payer selected.
+- Each person group can have its own payer selected. Changing the overall statement payer updates all groups.
 - A person group can be selected or omitted.
 
 Deselected lines:
@@ -623,7 +629,7 @@ E2E/visual tests cover:
 - visual snapshots
 - Mercado Pago token management, range validation, sync loading state, and result handling
 
-Mercado Pago unit tests cover report parsing, exact report correlation, report-config bootstrap, ownership, token lifecycle, asynchronous job state/results/failures, overlap rejection, interrupted-job recovery, incremental and historical ranges, idempotency, stale fingerprint recovery, deleted-expense reimport, merchant enrichment, stable merchant learning, categorization reuse, empty notes, and failed-download cursor behavior.
+Mercado Pago unit tests cover report parsing, exact report correlation, report-config bootstrap, ownership, token lifecycle, asynchronous job state/results/failures, overlap rejection, interrupted-job recovery, incremental and historical ranges, idempotency, stale fingerprint recovery, trash persistence across sync, manual restoration, merchant enrichment, stable merchant learning, categorization reuse, empty notes, and failed-download cursor behavior.
 
 When changing imports, always run at least:
 

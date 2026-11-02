@@ -2,6 +2,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+import re
+import unicodedata
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import delete, select
@@ -10,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_home_member
 from app.database import get_db
 from app.domain import Currency, ExpenseSource, ImportLineKind
-from app.models import CashWalletEntry, Category, Earning, Expense, FxRate, ImportBatch, ImportLine, Subcategory, User
+from app.models import CashWalletEntry, Category, Earning, Expense, FxRate, ImportBatch, ImportLine, Membership, Subcategory, User
 from app.schemas import ImportBatchRead, ImportBatchUpdate, ImportCommitRequest, ImportCoverageBatchRead
 from app.services.accounting import amount_to_ars
 from app.services.audit import log_action
@@ -119,6 +121,7 @@ async def upload_bbva_visa(
         period_label=parsed.period_label,
         statement_period=infer_card_statement_period(parsed.period_label),
         card_network=parsed.card_network,
+        owner_name=parsed.owner_name,
     )
     db.add(batch)
     db.flush()
@@ -126,6 +129,7 @@ async def upload_bbva_visa(
     categories = {c.name: c.id for c in db.scalars(select(Category).where(Category.home_group_id == home_group_id))}
     subcategories = _subcategories_by_name(db, home_group_id)
     fingerprint_occurrences: dict[str, int] = {}
+    owner_defaults_to_shared = _is_mauro_mastercard_expense(db, batch, _default_payer_for_batch(db, batch))
     for line in parsed.lines:
         occurrence = fingerprint_occurrences.get(line.fingerprint, 0) + 1
         fingerprint_occurrences[line.fingerprint] = occurrence
@@ -153,7 +157,7 @@ async def upload_bbva_visa(
                 suggested_category_id=suggested_category_id,
                 suggested_subcategory_id=suggested_subcategory_id,
                 suggested_recurring=suggested_recurring,
-                suggested_shared=suggested_shared or _is_mauro_name(line.cardholder_name) and parsed.card_network == "mastercard",
+                suggested_shared=suggested_shared or owner_defaults_to_shared,
                 fingerprint=f"{batch.id}:{unique_fingerprint}",
                 raw_text=line.raw_text,
             )
@@ -322,7 +326,7 @@ def commit_import(
     created = 0
     processed = 0
     for line in lines:
-        if _duplicate_status_for_line(db, line) == "already_committed":
+        if _duplicate_status_for_line(db, line) in ("already_committed", "deleted"):
             line.status = "duplicate"
             continue
         _fill_missing_suggestion(db, line)
@@ -472,6 +476,8 @@ def _read_batch(db: Session, batch_id: int) -> ImportBatchRead:
         period_label=batch.period_label,
         statement_period=batch.statement_period or infer_card_statement_period(batch.period_label),
         card_network=batch.card_network,
+        owner_name=batch.owner_name,
+        default_paid_by_user_id=_default_payer_for_batch(db, batch),
         fx_rate_ars_per_usd=batch.fx_rate_ars_per_usd,
         status=batch.status,
         created_at=batch.created_at.isoformat() if batch.created_at else None,
@@ -545,7 +551,7 @@ def _fill_missing_suggestion(db: Session, line: ImportLine) -> None:
         else suggest_shared(line.description, current_category_name)
     )
     batch = db.get(ImportBatch, line.import_batch_id)
-    if batch and batch.card_network == "mastercard" and _is_mauro_name(line.cardholder_name):
+    if batch and _is_mauro_mastercard_expense(db, batch, _default_payer_for_batch(db, batch)):
         line.suggested_shared = True
     db.flush()
 
@@ -578,6 +584,27 @@ def _suggest_import_line(
 
 def _is_mauro_name(value: str | None) -> bool:
     return bool(value and "MAURO" in value.upper())
+
+
+def _default_payer_for_batch(db: Session, batch: ImportBatch) -> int:
+    if not batch.owner_name or batch.source_type != "bbva_visa_pdf":
+        return batch.uploaded_by_user_id
+
+    def tokens(value: str) -> set[str]:
+        normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
+        return set(re.findall(r"[a-z]+", normalized))
+
+    owner_tokens = tokens(batch.owner_name)
+    members = db.scalars(select(User).join(Membership, Membership.user_id == User.id).where(Membership.home_group_id == batch.home_group_id))
+    matches = []
+    for member in members:
+        name_tokens = tokens(member.display_name)
+        if name_tokens and all(
+            any(part == token or (len(part) >= 4 and token.startswith(part)) for token in owner_tokens)
+            for part in name_tokens
+        ):
+            matches.append(member.id)
+    return matches[0] if len(matches) == 1 else batch.uploaded_by_user_id
 
 
 def _is_mauro_mastercard_expense(db: Session, batch: ImportBatch | None, paid_by_user_id: int) -> bool:
@@ -674,8 +701,17 @@ def _duplicate_status_for_line(db: Session, line: ImportLine) -> str:
     if not matching_prior:
         return "new"
     prior_ids = [prior.id for prior in matching_prior]
-    committed_expense = db.scalar(select(Expense.id).where(Expense.import_line_id.in_(prior_ids)))
+    committed_expense = db.scalar(select(Expense.id).where(Expense.import_line_id.in_(prior_ids), Expense.deleted_at.is_(None)))
     committed_earning = db.scalar(select(Earning.id).where(Earning.import_line_id.in_(prior_ids)))
-    if committed_expense or committed_earning or any(prior.status in ("committed", "ignored") for prior in matching_prior):
+    if committed_expense or committed_earning:
+        return "already_committed"
+    deleted_expense = db.scalar(select(Expense.id).where(Expense.import_line_id.in_(prior_ids), Expense.deleted_at.is_not(None)))
+    if deleted_expense:
+        return "deleted"
+    if any(
+        prior.status == "ignored"
+        or (prior.status == "committed" and prior.kind == ImportLineKind.cash_withdrawal)
+        for prior in matching_prior
+    ):
         return "already_committed"
     return "previously_parsed"

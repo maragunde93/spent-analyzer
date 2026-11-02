@@ -8,6 +8,9 @@ Spanish-first homelab app for tracking household bills, manual expenses, cash us
 - SQLAlchemy data model for users, home groups, categories, merchants, expenses, imports, Mercado Pago integrations, cash wallet entries, FX rates, and recurring rules.
 - BBVA Visa-style PDF parser using `pdfplumber`, with a sanitized fixture and parser tests.
 - React/Vite dark UI with dashboard analytics, expenses, import review, cash wallet, household settings, and per-user Mercado Pago controls.
+- Card imports default every consumption group to the owner detected in the statement header, with the uploader as fallback. Payers remain editable; credit expenses expose Visa/Mastercard labels and filters.
+- Deleted expenses stay in a household trash section and stop affecting totals. Reimporting or syncing keeps them deleted; manual restoration preserves their data and reinstates cash entries once. Imported expenses permanently deleted by older versions can be recovered by reimporting or syncing their period.
+- New Mercado Pago fund-income contributions require manual classification. Historical assignments remain unchanged; remembered-origin assignment is disabled.
 - Dashboard graphs for monthly consumption, category totals split by payer, recurring projections, accumulated consumption, category averages, and monthly variation.
 - Mercado Pago settlement-report synchronization with background manual jobs, persisted status, manual ranges, daily automatic sync, duplicate protection, merchant-name enrichment, and stable merchant learning.
 - Playwright E2E and visual snapshot tests for the main UI screens.

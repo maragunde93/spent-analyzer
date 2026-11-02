@@ -22,6 +22,8 @@ from app.models import (
     FundManualMovement,
     FundMonthShare,
     FundOpeningBalance,
+    FundMpAssignment,
+    FundMpOriginRule,
     HomeGroup,
     ImportBatch,
     ImportLine,
@@ -274,9 +276,9 @@ class HouseholdFundTests(unittest.TestCase):
         self.db.commit()
         refreshed = calculate_fund_summary(self.db, self.home.id, "2026-06")
         self.assertEqual(refreshed["mp_contributions"][0]["stable_origin_id"], "payer_document:dni:test")
-        self.assertTrue(refreshed["mp_contributions"][0]["can_remember_origin"])
+        self.assertFalse(refreshed["mp_contributions"][0]["can_remember_origin"])
 
-    def test_mp_payer_name_is_auto_classified_and_remembering_origin_updates_older_pending_income(self):
+    def test_mp_income_is_manual_even_with_matching_name_or_historical_origin_rule(self):
         integration = MercadoPagoIntegration(home_group_id=self.home.id, user_id=self.mauro.id, access_token="secret", fund_role="fondo_comun")
         self.db.add(integration)
         self.db.flush()
@@ -296,24 +298,38 @@ class HouseholdFundTests(unittest.TestCase):
 
         initial = calculate_fund_summary(self.db, self.home.id, "2026-06")
         by_description = {row["description"]: row for row in initial["mp_contributions"]}
-        self.assertEqual(by_description["Varios"]["contributor_user_id"], self.mica.id)
-        self.assertEqual(by_description["Varios"]["assignment_source"], "payer_name")
+        self.assertIsNone(by_description["Varios"]["contributor_user_id"])
+        self.assertIsNone(by_description["Varios"]["assignment_source"])
         self.assertEqual(by_description["Otro ingreso"]["classification"], "pending")
         self.assertEqual(by_description["Pago Debin"]["classification"], "pending")
 
-        response = update_mp_contribution(self.home.id, by_description["Varios"]["earning_id"], FundMpContributionUpdate(classification="contribution", contributor_user_id=self.mica.id, remember_origin=True), self.mauro, self.db)
-        self.assertTrue(response["origin_remembered"])
+        with self.assertRaises(HTTPException) as error:
+            update_mp_contribution(self.home.id, by_description["Varios"]["earning_id"], FundMpContributionUpdate(classification="contribution", contributor_user_id=self.mica.id, remember_origin=True), self.mauro, self.db)
+        self.assertEqual(error.exception.status_code, 400)
+        self.db.add(FundMpOriginRule(home_group_id=self.home.id, integration_id=integration.id, stable_origin_id="payer_document:cuil:mica", user_id=self.mauro.id, created_by_user_id=self.mauro.id))
+        update_mp_contribution(self.home.id, by_description["Varios"]["earning_id"], FundMpContributionUpdate(classification="contribution", contributor_user_id=self.mica.id), self.mauro, self.db)
         updated = calculate_fund_summary(self.db, self.home.id, "2026-06")
         by_description = {row["description"]: row for row in updated["mp_contributions"]}
-        self.assertEqual(by_description["Otro ingreso"]["contributor_user_id"], self.mica.id)
-        self.assertEqual(by_description["Otro ingreso"]["assignment_source"], "rule")
-        self.assertEqual(by_description["Varios"]["assignment_source"], "rule")
+        self.assertIsNone(by_description["Otro ingreso"]["contributor_user_id"])
+        self.assertEqual(by_description["Varios"]["contributor_user_id"], self.mica.id)
+        self.assertEqual(by_description["Varios"]["assignment_source"], "manual")
         self.assertFalse(by_description["Varios"]["can_remember_origin"])
         self.assertEqual(by_description["Pago Debin"]["classification"], "pending")
 
         update_mp_contribution(self.home.id, by_description["Otro ingreso"]["earning_id"], FundMpContributionUpdate(classification="excluded", contributor_user_id=None), self.mauro, self.db)
         manual = calculate_fund_summary(self.db, self.home.id, "2026-06")
         self.assertEqual(next(row for row in manual["mp_contributions"] if row["description"] == "Otro ingreso")["classification"], "excluded")
+
+        # An assignment made by the old automatic classifier must stay unchanged.
+        historical = self.db.query(FundMpAssignment).filter_by(earning_id=by_description["Pago Debin"]["earning_id"]).one()
+        historical.classification = "contribution"
+        historical.contributor_user_id = self.mauro.id
+        historical.updated_by_user_id = None
+        self.db.commit()
+        preserved = calculate_fund_summary(self.db, self.home.id, "2026-06")
+        row = next(row for row in preserved["mp_contributions"] if row["description"] == "Pago Debin")
+        self.assertEqual(row["contributor_user_id"], self.mauro.id)
+        self.assertEqual(row["classification"], "contribution")
 
     def test_personal_purchase_in_common_mp_account_requires_owner_repayment(self):
         integration = MercadoPagoIntegration(home_group_id=self.home.id, user_id=self.mauro.id, access_token="secret", fund_role="fondo_comun")

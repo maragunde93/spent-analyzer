@@ -21,7 +21,7 @@ from app.database import Base
 from app.domain import Currency, ExpenseSource, ImportLineKind
 from app.models import Category, Earning, Expense, HomeGroup, ImportLine, Membership, MercadoPagoIntegration, MercadoPagoMerchantRule, Merchant, User
 from app.api import mercadopago as mercadopago_api
-from app.api.expenses import delete_expense, update_expense
+from app.api.expenses import delete_expense, list_expenses, restore_expense, update_expense
 from app.schemas import ExpenseUpdate
 from app.services.mercadopago import (
     MercadoPagoClient,
@@ -489,7 +489,7 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.db.scalar(select(Expense).where(Expense.description == "Ferreteria Lanin")))
         self.assertEqual(len(list(self.db.scalars(select(Expense)))), 2)
 
-    async def test_deleted_mercadopago_expense_can_be_reimported(self):
+    async def test_trashed_mercadopago_expense_stays_deleted_until_manual_restore(self):
         await sync_integration(
             self.db,
             self.integration,
@@ -505,8 +505,8 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
         result = delete_expense(self.home.id, deleted_id, self.user, self.db)
 
         self.assertEqual(result, {"ok": True})
-        self.assertIsNone(self.db.get(Expense, deleted_id))
-        self.assertIsNone(self.db.get(ImportLine, deleted_line_id))
+        self.assertIsNotNone(self.db.get(Expense, deleted_id).deleted_at)
+        self.assertIsNotNone(self.db.get(ImportLine, deleted_line_id))
 
         resync = await sync_integration(
             self.db,
@@ -517,9 +517,13 @@ class MercadoPagoSyncTests(unittest.IsolatedAsyncioTestCase):
             now=datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc),
         )
 
-        self.assertEqual(resync.imported, 1)
-        self.assertEqual(resync.duplicates, 1)
-        self.assertIsNotNone(self.db.scalar(select(Expense).where(Expense.description == "Pago en tienda fisica")))
+        self.assertEqual(resync.imported, 0)
+        self.assertEqual(resync.duplicates, 2)
+        self.assertIsNotNone(self.db.get(Expense, deleted_id).deleted_at)
+        self.assertNotIn(deleted_id, [expense.id for expense in list_expenses(self.home.id, search=None, user=self.user, db=self.db)])
+        restored = restore_expense(self.home.id, deleted_id, self.user, self.db)
+        self.assertIsNone(restored.deleted_at)
+        self.assertEqual(restored.import_line_id, deleted_line_id)
         self.assertEqual(len(list(self.db.scalars(select(Expense)))), 2)
 
     async def test_stale_mercadopago_import_line_without_expense_is_reimported(self):

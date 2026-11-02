@@ -35,6 +35,8 @@ def ensure_incremental_schema() -> None:
     if engine.dialect.name == "sqlite":
         with engine.begin() as connection:
             expense_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(expenses)"))}
+            if "deleted_at" not in expense_columns:
+                connection.execute(text("ALTER TABLE expenses ADD COLUMN deleted_at DATETIME"))
             if "subcategory_id" not in expense_columns:
                 connection.execute(text("ALTER TABLE expenses ADD COLUMN subcategory_id INTEGER REFERENCES subcategories(id)"))
             if "notes" not in expense_columns:
@@ -53,6 +55,8 @@ def ensure_incremental_schema() -> None:
                 connection.execute(text("ALTER TABLE import_batches ADD COLUMN statement_period VARCHAR(7)"))
             if "card_network" not in import_batch_columns:
                 connection.execute(text("ALTER TABLE import_batches ADD COLUMN card_network VARCHAR(40)"))
+            if "owner_name" not in import_batch_columns:
+                connection.execute(text("ALTER TABLE import_batches ADD COLUMN owner_name VARCHAR(160)"))
             import_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(import_lines)"))}
             if "suggested_subcategory_id" not in import_columns:
                 connection.execute(text("ALTER TABLE import_lines ADD COLUMN suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
@@ -100,6 +104,7 @@ def ensure_incremental_schema() -> None:
             _repair_bank_import_signs(connection)
     elif engine.dialect.name == "postgresql":
         with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS notes TEXT"))
             connection.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
@@ -132,6 +137,7 @@ def ensure_incremental_schema() -> None:
             connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS fx_rate_ars_per_usd NUMERIC(14, 4)"))
             connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS statement_period VARCHAR(7)"))
             connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS card_network VARCHAR(40)"))
+            connection.execute(text("ALTER TABLE import_batches ADD COLUMN IF NOT EXISTS owner_name VARCHAR(160)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_subcategory_id INTEGER REFERENCES subcategories(id)"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_recurring BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE import_lines ADD COLUMN IF NOT EXISTS suggested_shared BOOLEAN NOT NULL DEFAULT FALSE"))

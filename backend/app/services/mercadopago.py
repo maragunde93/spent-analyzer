@@ -976,7 +976,7 @@ def _refresh_existing_description(db: Session, line: ImportLine, description: st
         return
     line.description = description
     expense = db.scalar(select(Expense).where(Expense.import_line_id == line.id))
-    if expense is not None and _should_replace_existing_description(expense.description, description):
+    if expense is not None and expense.deleted_at is None and _should_replace_existing_description(expense.description, description):
         expense.description = description
     earning = db.scalar(select(Earning).where(Earning.import_line_id == line.id))
     if earning is not None and _should_replace_existing_description(earning.description, description):

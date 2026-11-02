@@ -124,6 +124,29 @@ class BbvaParserTests(unittest.TestCase):
 
         self.assertEqual(parsed.card_network, "mastercard")
 
+    def test_owner_comes_from_mailing_header_not_first_additional_card(self):
+        parsed = parse_bbva_visa_text("""
+Resumen
+Mastercard
+OCASA - R.N.P.S.P. N° 000 M01
+PEREZ ALICIA
+CALLE DEMO 123
+Tarjetas de Credito
+cuenta 000000
+Consumos Bruno Demo
+01-Oct-26 COMPRA EXTENSION 100,00
+Consumos Alicia Perez
+02-Oct-26 COMPRA TITULAR 200,00
+""")
+        self.assertEqual(parsed.owner_name, "PEREZ ALICIA")
+        self.assertEqual(parsed.lines[0].cardholder_name, "Bruno Demo")
+
+    def test_owner_is_optional_and_never_inferred_from_consumption_order(self):
+        parsed = parse_bbva_visa_text("Consumos Bruno Demo\n01-Oct-26 COMPRA 100,00")
+        self.assertIsNone(parsed.owner_name)
+        explicit = parse_bbva_visa_text("Titular: Pérez Alicia\nConsumos Bruno Demo\n01-Oct-26 COMPRA 100,00")
+        self.assertEqual(explicit.owner_name, "Pérez Alicia")
+
 
 if __name__ == "__main__":
     unittest.main()

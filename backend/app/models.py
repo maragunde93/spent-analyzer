@@ -150,7 +150,15 @@ class Expense(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    import_line: Mapped["ImportLine | None"] = relationship(lazy="joined")
+
+    @property
+    def card_network(self) -> str | None:
+        if self.source == ExpenseSource.import_pdf and self.import_line:
+            return self.import_line.batch.card_network
+        return None
 
 
 class Earning(Base):
@@ -181,6 +189,7 @@ class ImportBatch(Base):
     period_label: Mapped[str | None] = mapped_column(String(80), nullable=True)
     statement_period: Mapped[str | None] = mapped_column(String(7), nullable=True)
     card_network: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    owner_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     fx_rate_ars_per_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="parsed")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -212,6 +221,7 @@ class ImportLine(Base):
     mercadopago_collector_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     mercadopago_store_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     mercadopago_origin_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    batch: Mapped["ImportBatch"] = relationship(lazy="joined")
 
 
 class CashWalletEntry(Base):

@@ -51,6 +51,7 @@ class ParsedStatement:
     period_label: str | None
     card_network: str | None
     lines: list[ParsedStatementLine]
+    owner_name: str | None = None
 
 
 def parse_argentine_decimal(value: str) -> Decimal:
@@ -128,7 +129,25 @@ def parse_bbva_visa_text(text: str) -> ParsedStatement:
         if parsed:
             lines.append(parsed)
 
-    return ParsedStatement(account=account, period_label=period_label, card_network=card_network, lines=lines)
+    return ParsedStatement(account=account, period_label=period_label, card_network=card_network, lines=lines, owner_name=_detect_owner_name(text))
+
+
+def _detect_owner_name(text: str) -> str | None:
+    # The mailing header identifies the account owner. Consumption sections may
+    # start with an additional cardholder and must never supply this default.
+    header = re.split(r"(?im)^\s*(?:Tarjetas de Cr[eé]dito|CIERRE ACTUAL|Sus pagos|Consumos\s)", text, maxsplit=1)[0]
+    lines = [" ".join(line.split()) for line in header.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        explicit = re.match(r"(?i)^(?:Titular|Nombre y apellido|Apellido y nombre)\s*:\s*(.*)$", line)
+        if explicit:
+            candidate = explicit.group(1) or (lines[index + 1] if index + 1 < len(lines) else "")
+        elif re.search(r"(?i)\b(?:OCASA|R\.N\.P\.S\.P\.)", line) and index + 1 < len(lines):
+            candidate = lines[index + 1]
+        else:
+            continue
+        if len(candidate.split()) >= 2 and re.fullmatch(r"[^\W\d_]+(?:[ '\-][^\W\d_]+)+", candidate, re.UNICODE):
+            return candidate[:160]
+    return None
 
 
 def _detect_card_network(text: str) -> str | None:
